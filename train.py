@@ -47,6 +47,6 @@ if __name__ == "__main__":
     )
 
     # model.learn(total_timesteps=100_000_000, callback=checkpoint_callback)
-    model.learn(total_timesteps=500_000)
+    model.learn(total_timesteps=25_000_000)
     model.save("outputs/one_gate")
     env.close()

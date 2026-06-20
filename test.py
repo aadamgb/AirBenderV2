@@ -2,8 +2,8 @@ import time
 from stable_baselines3 import PPO
 from env.quadrotor_env import QuadrotorEnv
 
-# model = PPO.load("outputs/racing_11000000_steps")
-model = PPO.load("outputs/one_gate")
+model = PPO.load("outputs/racing_best")
+# model = PPO.load("outputs/one_gate")
 
 env = QuadrotorEnv(render_mode="human")
 # env = QuadrotorEnv()

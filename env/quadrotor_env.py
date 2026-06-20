@@ -1,5 +1,8 @@
 from __future__ import annotations
+from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
+import csv
 
 import numpy as np
 import torch
@@ -20,14 +23,15 @@ MAX_T     = 20.0
 DT        = 0.01
 TORQUE_C  = 0.012
 
-X_THRESH        = 4.0
+X_THRESH        = 3.0
 Y_THRESH        = 8.0
 Z_THRESH        = 3.0
 GATE_HALF_W     = 0.6
 GATE_HALF_H     = 0.6
 MAX_STEPS       = 1200
 
-TRACK_PATH = "misc/racing_tracks/one_gate.yaml"
+TRACK_PATH = "misc/racing_tracks/fig8.yaml"
+PPO_LOG_DIR = "/home/adame/AirBender/outputs/ppo_logs"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,13 +116,14 @@ class QuadrotorVecEnv(VecEnv):
 
         offset = torch.tensor([0., -1., 0.], dtype=torch.float32, device=self.device).expand(n, -1)
         noise  = torch.randn(n, 3, dtype=torch.float32, device=self.device) * 0.2
-        start  = gate_pos + (gate_R @ (offset + noise).unsqueeze(-1)).squeeze(-1)
+        # start  = gate_pos + (gate_R @ (offset + noise).unsqueeze(-1)).squeeze(-1)
+        # start  = gate_pos + (gate_R @ (offset + noise).unsqueeze(-1)).squeeze(-1)
 
-        self.states[idx]        = 0.0
-        self.states[idx, 0:3]  = start
+        self.states[idx]       = 0.0
+        self.states[idx, 0:3]  = 0.0
         self.states[idx, 3:6]  = (torch.rand(n, 3, device=self.device) - 0.5)  # vel ∈ [-0.5, 0.5]
         self.states[idx, 6]    = 1.0   # qw = 1 (identity rotation)
-        self.prev_pos[idx]     = start
+        self.prev_pos[idx]     = 0.0
         self.step_count[idx]   = 0
 
     # ── Observation ───────────────────────────────────────────────────────────
@@ -182,13 +187,13 @@ class QuadrotorVecEnv(VecEnv):
             (p[:, 2] > Z_THRESH)       |
             gate_crash
         )
-        truncated = self.step_count >= MAX_STEPS
+        truncated = (self.step_count >= MAX_STEPS) | gate_success 
         dones     = terminated | truncated
 
         rewards = (
               1.0  * progress
             - 0.001 * w.norm(dim=-1)
-            - 10.0  * terminated.float()
+            # - 10.0  * terminated.float()
         )
 
         obs      = self._get_obs()
@@ -254,11 +259,16 @@ class QuadrotorEnv(gym.Env):
     """
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
 
-    def __init__(self, render_mode=None):
+    def __init__(self, render_mode=None, log_dir: Optional[str] = PPO_LOG_DIR):
         super().__init__()
         self.render_mode = render_mode
         self._renderer   = None
         self._stop_simulation = False
+        self._log_dir = Path(log_dir) if log_dir is not None else None
+        self._log_file = None
+        self._log_writer = None
+        self._episode_id = -1
+        self._step_index = 0
 
         gates_pos_np, gates_rpy_np = load_gates_from_yaml(TRACK_PATH)
         self.gates_position = gates_pos_np   # (G, 3) numpy, kept for renderer
@@ -281,10 +291,29 @@ class QuadrotorEnv(gym.Env):
         self.observation_space = spaces.Box(-obs_high, obs_high, dtype=np.float32)
         self.action_space      = spaces.Box(0.0, 1.0, shape=(4,), dtype=np.float32)
 
+        if self._log_dir is not None:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_path = self._log_dir / f"quadrotor_state_log_{timestamp}.csv"
+            self._log_file = open(log_path, "w", newline="", encoding="utf-8")
+            fieldnames = [
+                "episode",
+                "step",
+                "time_s",
+                "gate_idx",
+                "reward",
+                "terminated",
+                "truncated",
+            ] + [f"state_{i}" for i in range(13)] + [f"action_{i}" for i in range(4)]
+            self._log_writer = csv.DictWriter(self._log_file, fieldnames=fieldnames)
+            self._log_writer.writeheader()
+
     # ── Gym interface ─────────────────────────────────────────────────────────
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self._episode_id += 1
+        self._step_index = 0
 
         n_gates = len(self.gates_position)
         self.gate_idx        = int(self.np_random.integers(n_gates))
@@ -301,6 +330,7 @@ class QuadrotorEnv(gym.Env):
 
         self._state = np.zeros(13, dtype=np.float32)
         self._state[0:3] = self._curr_gate_pos + gate_R @ (offset + noise)
+        # self._state[2] = 1.0
         self._state[3:6] = self.np_random.uniform(-0.5, 0.5, 3).astype(np.float32)
         self._state[6]   = 1.0   # identity quaternion
 
@@ -313,9 +343,28 @@ class QuadrotorEnv(gym.Env):
         self._lap_count = 0
 
         if self._renderer is not None:
-            self._renderer.set_target(self._curr_gate_pos, self.gate_idx)
+            self._renderer.set_target(self.gate_idx)
 
         return self._get_obs(), {}
+
+    def _log_step(self, action: np.ndarray, reward: float, terminated: bool, truncated: bool) -> None:
+        if self._log_writer is None:
+            return
+
+        row = {
+            "episode": self._episode_id,
+            "step": self._step_index,
+            "time_s": float(self._step_index * DT),
+            "gate_idx": int(self.gate_idx),
+            "reward": float(reward),
+            "terminated": int(bool(terminated)),
+            "truncated": int(bool(truncated)),
+        }
+        row.update({f"state_{i}": float(value) for i, value in enumerate(self._state.tolist())})
+        row.update({f"action_{i}": float(value) for i, value in enumerate(np.asarray(action, dtype=np.float32).tolist())})
+        self._log_writer.writerow(row)
+        self._log_file.flush()
+        self._step_index += 1
 
     def step(self, action: np.ndarray):
         if self._stop_simulation:
@@ -362,7 +411,7 @@ class QuadrotorEnv(gym.Env):
             # progress            = 0.0
             
             if self._renderer is not None:
-                self._renderer.set_target(self._curr_gate_pos, self.gate_idx)
+                self._renderer.set_target(self.gate_idx)
 
         terminated = bool(
                p[0] < -X_THRESH or p[0] > X_THRESH
@@ -370,13 +419,15 @@ class QuadrotorEnv(gym.Env):
             or p[2] < 0.0 or p[2] > Z_THRESH
             or gate_crash
         )
-        truncated = self._step_count >= MAX_STEPS
+        truncated = self._step_count >= MAX_STEPS #or gate_success
 
         reward = (
               1.0  * progress
             - 0.001 * np.linalg.norm(w)
-            - 10.0  * terminated
+            # - 10.0  * terminated
         )
+
+        self._log_step(action=action, reward=float(reward), terminated=terminated, truncated=truncated)
 
         self._prev_pos = p.copy()
 
@@ -422,6 +473,10 @@ class QuadrotorEnv(gym.Env):
             self.render_mode = None
 
     def close(self):
+        if self._log_file is not None:
+            self._log_file.close()
+            self._log_file = None
+            self._log_writer = None
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None

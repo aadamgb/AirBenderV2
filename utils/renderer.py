@@ -244,6 +244,10 @@ class BaseRenderer:
 
         self._step_count += 1
         return True
+    
+    @property
+    def is_paused(self):
+        return self._paused
 
     def close(self):
         if self._window is not None:
@@ -437,7 +441,7 @@ class RacingRenderer(BaseRenderer):
         self._inactive_i.from_numpy(np.concatenate(inactive_faces).flatten())
 
     # ------------------------------------------------------------------
-    def set_target(self, target: np.ndarray, gate_idx: int):
+    def set_target(self, gate_idx: int):
         self._upload_gate_split(gate_idx)
 
     # ------------------------------------------------------------------
