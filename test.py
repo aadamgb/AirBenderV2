@@ -2,11 +2,9 @@ import time
 from stable_baselines3 import PPO
 from env.quadrotor_env import QuadrotorEnv
 
-model = PPO.load("outputs/racing_best")
-# model = PPO.load("outputs/one_gate")
+model = PPO.load("outputs/UZH_best")
 
 env = QuadrotorEnv(render_mode="human")
-# env = QuadrotorEnv()
 obs, _ = env.reset()
 
 episode = 0

@@ -11,26 +11,32 @@ from gymnasium import spaces
 from stable_baselines3.common.vec_env import VecEnv
 
 from dynamics.quadrotor_dynamics import QuadrotorDynamics
-from misc.loader import load_gates_from_yaml
+from utils.randomizer import QuadrotorRandomizer
 from utils.math import rpy_to_rotmat, rpy_to_rotmat_np
+from misc.loader import load_gates_from_yaml
 
 # ── Shared physics / track constants ─────────────────────────────────────────
 GRAVITY   = 9.81
 MASS      = 1.21
 INERTIA   = (0.007, 0.007, 0.013)
 LENGTH    = 0.15
+ANGLE     = 45.0
 MAX_T     = 20.0
 DT        = 0.01
 TORQUE_C  = 0.012
 
-X_THRESH        = 3.0
-Y_THRESH        = 8.0
-Z_THRESH        = 3.0
+X_THRESH        = 10.0
+Y_THRESH        = 10.0
+Z_THRESH        = 6.0
 GATE_HALF_W     = 0.6
 GATE_HALF_H     = 0.6
-MAX_STEPS       = 1200
+MAX_STEPS       = 1200*2
 
-TRACK_PATH = "misc/racing_tracks/fig8.yaml"
+Y_WIND_MIN = -1.0
+Y_WIND_MAX =  1.0
+DIST_X_DIR = 15.0 # m/s2
+
+TRACK_PATH = "misc/racing_tracks/uzh.yaml"
 PPO_LOG_DIR = "/home/adame/AirBender/outputs/ppo_logs"
 
 
@@ -56,6 +62,7 @@ class QuadrotorVecEnv(VecEnv):
             np.finfo(np.float32).max,
             np.finfo(np.float32).max,
             np.finfo(np.float32).max,                     # ω
+            100., 100., 100.,                             # gate_pos
             1., 1., 1.,                                   # gate_normal
             float(64),                                    # gate_idx
         ], dtype=np.float32)
@@ -72,17 +79,22 @@ class QuadrotorVecEnv(VecEnv):
         self.n_gates  = len(gates_pos_np)
         gates_pos_t   = torch.tensor(gates_pos_np, dtype=torch.float32, device=self.device)
         gates_rpy_t   = torch.tensor(gates_rpy_np, dtype=torch.float32, device=self.device)
-        gates_R_t     = rpy_to_rotmat(gates_rpy_t)          # (G, 3, 3)
+        gates_R_t     = rpy_to_rotmat(gates_rpy_t)          
 
         self.register_buffer = lambda name, t: setattr(self, name, t)
-        self.gates_pos    = gates_pos_t                     # (G, 3)
-        self.gates_R      = gates_R_t                       # (G, 3, 3)
-        self.gates_normal = gates_R_t[:, :, 1]             # (G, 3)  y-axis forward
+        self.gates_pos    = gates_pos_t                     
+        self.gates_R      = gates_R_t                       
+        self.gates_normal = gates_R_t[:, :, 1]             
 
+        self.randomizer = QuadrotorRandomizer(
+            mass=MASS, inertia=INERTIA, length=LENGTH,
+            torque_c=TORQUE_C, angle=ANGLE,
+        )
+
+        mass, inertia, length, torque_const, angle = self.randomizer.sample(num_envs, randomize=False)
         self.dynamics = QuadrotorDynamics(
-            mass=MASS, inertia=INERTIA, length=LENGTH, gravity=GRAVITY,
-            dt=DT, max_thrust=MAX_T, torque_const=TORQUE_C,
-            device=str(self.device),
+            mass=mass, inertia=inertia, length=length, torque_const=torque_const, angle=angle,
+            gravity=GRAVITY, dt=DT, max_thrust=MAX_T, device=device,
         )
 
         # Per-env tensors
@@ -116,15 +128,17 @@ class QuadrotorVecEnv(VecEnv):
 
         offset = torch.tensor([0., -1., 0.], dtype=torch.float32, device=self.device).expand(n, -1)
         noise  = torch.randn(n, 3, dtype=torch.float32, device=self.device) * 0.2
-        # start  = gate_pos + (gate_R @ (offset + noise).unsqueeze(-1)).squeeze(-1)
-        # start  = gate_pos + (gate_R @ (offset + noise).unsqueeze(-1)).squeeze(-1)
+        start  = gate_pos + (gate_R @ (offset + noise).unsqueeze(-1)).squeeze(-1)
 
         self.states[idx]       = 0.0
-        self.states[idx, 0:3]  = 0.0
+        self.states[idx, 0:3]  = start
         self.states[idx, 3:6]  = (torch.rand(n, 3, device=self.device) - 0.5)  # vel ∈ [-0.5, 0.5]
         self.states[idx, 6]    = 1.0   # qw = 1 (identity rotation)
         self.prev_pos[idx]     = 0.0
         self.step_count[idx]   = 0
+
+        self.dynamics.set_params(*self.randomizer.sample(n), idx=idx)
+        # self.dynamics.print_params()
 
     # ── Observation ───────────────────────────────────────────────────────────
 
@@ -140,7 +154,7 @@ class QuadrotorVecEnv(VecEnv):
         gate_norm  = self.gates_normal[self.gate_idx]                  # (N, 3)
         gate_idx_f = self.gate_idx.float().unsqueeze(-1)               # (N, 1)
 
-        obs = torch.cat([rel_pos, rel_vel, q, w, gate_norm, gate_idx_f], dim=-1)
+        obs = torch.cat([rel_pos, rel_vel, q, w, gate_pos, gate_norm, gate_idx_f], dim=-1)
         return obs.cpu().numpy().astype(np.float32)
 
     # ── VecEnv interface ──────────────────────────────────────────────────────
@@ -169,7 +183,6 @@ class QuadrotorVecEnv(VecEnv):
         prev_rel = (RT @ (prev_pos - gate_pos).unsqueeze(-1)).squeeze(-1)  # (N, 3)
         curr_rel = (RT @ (p       - gate_pos).unsqueeze(-1)).squeeze(-1)   # (N, 3)
 
-        # progress      = curr_rel[:, 1] - prev_rel[:, 1]
         progress      =  prev_rel.norm(dim=-1) - curr_rel.norm(dim=-1)  
         plane_crossed = (prev_rel[:, 1] < 0.0) & (curr_rel[:, 1] >= 0.0)
         inside_gate   = (curr_rel[:, 0].abs() < GATE_HALF_W) & (curr_rel[:, 2].abs() < GATE_HALF_H)
@@ -178,7 +191,6 @@ class QuadrotorVecEnv(VecEnv):
 
         if gate_success.any():
             self.gate_idx[gate_success] = (self.gate_idx[gate_success] + 1) % self.n_gates
-            # progress[gate_success]      = 0.0
 
         terminated = (
             (p[:, 0].abs() > X_THRESH) |
@@ -187,13 +199,13 @@ class QuadrotorVecEnv(VecEnv):
             (p[:, 2] > Z_THRESH)       |
             gate_crash
         )
-        truncated = (self.step_count >= MAX_STEPS) | gate_success 
+        truncated = (self.step_count >= MAX_STEPS)
         dones     = terminated | truncated
 
         rewards = (
               1.0  * progress
             - 0.001 * w.norm(dim=-1)
-            # - 10.0  * terminated.float()
+            - 10.0  * terminated.float()
         )
 
         obs      = self._get_obs()
@@ -274,9 +286,15 @@ class QuadrotorEnv(gym.Env):
         self.gates_position = gates_pos_np   # (G, 3) numpy, kept for renderer
         self.gates_rpy      = gates_rpy_np   # (G, 3) numpy
 
+        self.randomizer = QuadrotorRandomizer(
+            mass=MASS, inertia=INERTIA, length=LENGTH,
+            torque_c=TORQUE_C, angle=ANGLE,
+            device="cpu",
+        )
         self.dynamics = QuadrotorDynamics(
-            mass=MASS, inertia=INERTIA, length=LENGTH, gravity=GRAVITY,
-            dt=DT, max_thrust=MAX_T, torque_const=TORQUE_C, device="cpu",
+            *self.randomizer.sample(1, randomize=False), 
+            max_thrust=MAX_T, gravity=GRAVITY, dt=DT,
+            device="cpu",
         )
 
         obs_high = np.array([
@@ -284,6 +302,7 @@ class QuadrotorEnv(gym.Env):
             40., 40., 40.,
             1., 1., 1., 1.,
             np.finfo(np.float32).max, np.finfo(np.float32).max, np.finfo(np.float32).max,
+            100.0, 100.0, 100.0,
             1., 1., 1.,
             float(len(self.gates_position)),
         ], dtype=np.float32)
@@ -312,11 +331,14 @@ class QuadrotorEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self.dynamics.set_params(*self.randomizer.sample(1))
+        self.dynamics.print_params()
         self._episode_id += 1
         self._step_index = 0
 
         n_gates = len(self.gates_position)
         self.gate_idx        = int(self.np_random.integers(n_gates))
+        self.gate_idx        = 0
         self._curr_gate_pos  = self.gates_position[self.gate_idx]
         self._curr_gate_rpy  = self.gates_rpy[self.gate_idx]
 
@@ -378,6 +400,10 @@ class QuadrotorEnv(gym.Env):
         state_t  = torch.from_numpy(self._state).unsqueeze(0)   # (1, 13)
         action_t = torch.from_numpy(action.astype(np.float32)).unsqueeze(0)  # (1, 4)
         self._state = self.dynamics.propagate(state_t, action_t)[0].numpy()
+        
+        # # Simulating wind disturbance
+        # in_zone = (self._state[1] >= Y_WIND_MIN) & (self._state[1] <= Y_WIND_MAX)
+        # self._state[in_zone, 3] -= DIST_X_DIR * DT 
 
         self._step_count += 1
         p = self._state[0:3]
@@ -424,7 +450,7 @@ class QuadrotorEnv(gym.Env):
         reward = (
               1.0  * progress
             - 0.001 * np.linalg.norm(w)
-            # - 10.0  * terminated
+            - 10.0  * terminated
         )
 
         self._log_step(action=action, reward=float(reward), terminated=terminated, truncated=truncated)
@@ -449,8 +475,10 @@ class QuadrotorEnv(gym.Env):
         gate_norm = gate_R[:, 1]                    # y-axis = forward through gate
 
         return np.concatenate([
-            rel_pos, rel_vel, q, w, gate_norm,
-            np.array([self.gate_idx], dtype=np.float32),
+            rel_pos, rel_vel, q, w,
+            self._curr_gate_pos, 
+            gate_norm, np.array([self.gate_idx], 
+            dtype=np.float32),
         ]).astype(np.float32)
 
     def render(self):

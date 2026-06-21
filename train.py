@@ -16,17 +16,6 @@ if __name__ == "__main__":
         log_std_init=0,
     )
 
-    # model = PPO(
-    #     "MlpPolicy",
-    #     env,
-    #     policy_kwargs=policy_kwargs,
-    #     verbose=1,
-    #     gamma=0.999,
-    #     device=device,
-    #     n_steps=128,
-    #     batch_size=512,
-    #     tensorboard_log="outputs/tb/"
-    # )
     model = PPO(
         "MlpPolicy",
         env,
@@ -37,16 +26,16 @@ if __name__ == "__main__":
         batch_size=5000,
         n_epochs=10,
         gamma=0.999,
-        tensorboard_log="outputs/tb/"
+        tensorboard_log="outputs/tb/",
     )
 
     checkpoint_callback = CheckpointCallback(
         save_freq=7812,
         save_path="outputs",
-        name_prefix="racing",
+        name_prefix="UZH",
+
     )
 
-    # model.learn(total_timesteps=100_000_000, callback=checkpoint_callback)
-    model.learn(total_timesteps=25_000_000)
-    model.save("outputs/one_gate")
+    model.learn(total_timesteps=100_000_000, callback=checkpoint_callback)
+    model.save("outputs/UZH")
     env.close()

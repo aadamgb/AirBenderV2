@@ -2,14 +2,12 @@ import math
 import torch
 from utils.math import quat_to_rotmat, quat_derivative
 
-
 def _deriv(p, v, q, w, Fz, tau, m, J, G):
-    # p,v: (N,3)  q: (N,4)  w: (N,3)  Fz: (N,)  tau: (N,3)
-    R = quat_to_rotmat(q)                              # (N, 3, 3)
-    thrust_world = Fz.unsqueeze(-1) * R[..., 2]       # z-column of R scaled by Fz → (N, 3)
+    R = quat_to_rotmat(q)                              
+    thrust_world = Fz.unsqueeze(-1) * R[..., 2]       
     p_dot = v
     v_dot = thrust_world / m + G
-    w_dot = (tau - torch.linalg.cross(w, w * J)) / J  # Euler: (τ - ω × Jω) / J
+    w_dot = (tau - torch.linalg.cross(w, w * J)) / J 
     q_dot = quat_derivative(q, w)
     return p_dot, v_dot, q_dot, w_dot
 
@@ -28,7 +26,6 @@ def integrate_rk4(dt, p, v, q, w, Fz, tau, m, J, G):
     q_n = q_n / q_n.norm(dim=-1, keepdim=True)
     return p_n, v_n, q_n, w_n
 
-
 class QuadrotorDynamics:
     """
     Batched rigid-body quadrotor dynamics on a chosen torch device.
@@ -37,36 +34,77 @@ class QuadrotorDynamics:
     Action : (N,  4)  per-motor thrust fraction ∈ [0, 1]
     """
 
-    def __init__(self, mass, inertia, length, gravity, dt, max_thrust, torque_const, device='cuda'):
+    def __init__(self, mass, inertia, length, torque_const, angle, max_thrust, gravity, dt, device='cuda'):
         self.dt = dt
-        self.mass = mass
         self.max_thrust = max_thrust
         self.device = torch.device(device if torch.cuda.is_available() or device == 'cpu' else 'cpu')
-
-        s = math.sin(math.radians(45.0))
-        c = math.cos(math.radians(45.0))
-        l, ct = length, torque_const
-
-        # Maps per-motor thrust [u1..u4] → [Fz, τx, τy, τz]
-        self.mixer = torch.tensor([
-            [ 1.0,   1.0,  1.0,  1.0],
-            [-l*s,   l*s,  l*s, -l*s],
-            [-l*c,   l*c, -l*c,  l*c],
-            [-ct,   -ct,   ct,   ct ],
-        ], dtype=torch.float32, device=self.device)  # (4, 4)
-
-        self.J = torch.tensor(inertia,         dtype=torch.float32, device=self.device)
+ 
         self.G = torch.tensor([0., 0., -gravity], dtype=torch.float32, device=self.device)
+        self.set_params(mass, inertia, length, torque_const, angle)
 
-    # @torch.no_grad()
     def propagate(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """
         state:  (N, 13)
         action: (N,  4) ∈ [0, 1]
-        → next state: (N, 13)
         """
         p, v, q, w = state[:, 0:3], state[:, 3:6], state[:, 6:10], state[:, 10:13]
-        wrench = (action * self.max_thrust) @ self.mixer.T  # (N, 4)
+        thrust = action * self.max_thrust                                
+        wrench = torch.matmul(self.mixer, thrust.unsqueeze(-1)).squeeze(-1)  
         Fz, tau = wrench[:, 0], wrench[:, 1:4]
         p_n, v_n, q_n, w_n = integrate_rk4(self.dt, p, v, q, w, Fz, tau, self.mass, self.J, self.G)
         return torch.cat([p_n, v_n, q_n, w_n], dim=-1)
+
+    @staticmethod
+    def _build_mixer(length: torch.Tensor, angle: torch.Tensor, ct: torch.Tensor) -> torch.Tensor:
+        """Maps per-motor thrust [u1..u4] → [Fz, τx, τy, τz], built from per-rotor arm length(s)."""
+        sign_x = torch.tensor([-1.,  1.,  1., -1.], device=length.device)
+        sign_y = torch.tensor([-1.,  1., -1.,  1.], device=length.device)
+        sign_z = torch.tensor([-1., -1.,  1.,  1.], device=length.device)
+ 
+        angle_rad = torch.deg2rad(angle)
+        s, c = torch.sin(angle_rad), torch.cos(angle_rad)
+
+        row_Fz  = torch.ones_like(length)
+        row_tx  = length * s * sign_x
+        row_ty  = length * c * sign_y
+        row_tz  = (ct * sign_z) * torch.ones_like(length)
+        return torch.stack([row_Fz, row_tx, row_ty, row_tz], dim=-2)  
+    
+    def set_params(self, 
+                   mass, inertia, 
+                   length, angle, 
+                   torque_const, 
+                #    tau_m, eta,
+                #    Cd,
+                   idx: torch.Tensor = None) -> None:
+
+        mixer = self._build_mixer(length, angle, torque_const)  
+
+        if idx is None:
+            self.mass = mass
+            self.J = inertia
+            self.length = length
+            self.angle = angle
+            self.torque_const = torque_const
+            self.mixer = mixer
+        else:
+            self.mass[idx]         = mass
+            self.J[idx]            = inertia
+            self.length[idx]       = length
+            self.angle[idx]        = angle
+            self.torque_const[idx] = torque_const
+            self.mixer[idx]        = mixer
+
+    def print_params(self) -> None:
+        """Prints current physical parameters: mass, inertia (J), arm length, torque constant, and angle."""
+        def to_cpu(x):
+            try:
+                return x.detach().cpu().numpy()
+            except Exception:
+                return x
+
+        print("Mass:\n", to_cpu(self.mass))
+        print("Inertia (J):\n", to_cpu(self.J))
+        print("Length:\n", to_cpu(self.length))
+        print("Angle (deg):\n", to_cpu(self.angle))
+        print("Torque_const:\n", to_cpu(self.torque_const))
