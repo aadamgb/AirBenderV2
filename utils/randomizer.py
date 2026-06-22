@@ -9,7 +9,8 @@ class QuadrotorRandomizer:
                  torque_c:  float = 0.012, 
                  tau_m:     float = 0.05, 
                  eta:       float = 1.0,
-                 Cd:        float = (0.28,0.35,0.70),
+                 Cd:        float = (0.28, 0.35, 0.70),
+                 rho:       float = 1.225,
                  p:         float = 0.2, 
                  device='cuda',
                  ):
@@ -22,9 +23,10 @@ class QuadrotorRandomizer:
         length_nom       = torch.as_tensor(length,   dtype=torch.float32, device=self.device)
         self.angle_nom   = torch.as_tensor(angle,    dtype=torch.float32, device=self.device)  
         torque_const_nom = torch.as_tensor(torque_c, dtype=torch.float32, device=self.device)
-        self.tau_m_nom   = torch.as_tensor(tau_m,    dtype=torch.float32, device=self.device) # NOTE: Maybe have tau per env? test first with normal tau
+        self.tau_m_nom   = torch.as_tensor(tau_m,    dtype=torch.float32, device=self.device) # NOTE: Maybe have different tau per motor? test first with normal tau tough
         eta_nom          = torch.as_tensor(eta,      dtype=torch.float32, device=self.device)
         self.Cd_nom      = torch.as_tensor(Cd,       dtype=torch.float32, device=self.device)
+        self.rho_nom     = torch.as_tensor(rho,      dtype=torch.float32, device=self.device)
         
         if length_nom.ndim == 0:
             length_nom = length_nom.expand(4)  
@@ -59,7 +61,8 @@ class QuadrotorRandomizer:
         length       = self._uniform_additive(self.length_nom,             n, randomize, 0.1*self.p)                  
         angle        = self._uniform_additive(self.angle_nom,              n, randomize, self.p).unsqueeze(-1)
         torque_const = self._uniform_multiplicative(self.torque_const_nom, n, randomize, self.p)                   
-        tau_m        = self._uniform_multiplicative(self.tau_m_nom,        n, randomize, self.p)                   
-        eta          = self._uniform_multiplicative(self.eta_nom,          n, randomize, self.p)                   
+        tau_m        = self._uniform_multiplicative(self.tau_m_nom,        n, randomize, self.p).unsqueeze(-1)                   
+        eta          = self._uniform_multiplicative(self.eta_nom,          n, randomize, self.p) # NOTE: Clamp to 1.0?                  
         Cd           = self._uniform_multiplicative(self.Cd_nom,           n, randomize, self.p)                   
-        return mass, inertia, length, angle, torque_const, #tau_m, eta, Cd
+        rho          = self._uniform_multiplicative(self.rho_nom,          n, randomize, self.p).unsqueeze(-1)                    
+        return mass, inertia, length, angle, torque_const, tau_m, eta, Cd, rho

@@ -2,7 +2,7 @@ import time
 from stable_baselines3 import PPO
 from env.quadrotor_env import QuadrotorEnv
 
-model = PPO.load("outputs/UZH_best")
+model = PPO.load("outputs/DragTest_15M")
 
 env = QuadrotorEnv(render_mode="human")
 obs, _ = env.reset()

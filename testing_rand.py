@@ -18,8 +18,11 @@ dyanamics = QuadrotorDynamics(
 )
 
 actions = torch.tensor([1.0, 1.0, 1.0, 1.0], device=device).expand(num_envs, -1)
-for step in range(2):
-    if step == 1:
-        dyanamics.set_params(*randomizer.sample(2), idx=[0,2])
-    print(f"✅ PARAMS FOR STEP: {step+1} ✅")   
+for step in range(1):
+    if step == 0:
+        dyanamics.set_params(*randomizer.sample(1), idx=[0])
+    # print(f"\n ✅ PARAMS FOR STEP: {step+1} ✅")   
     dyanamics.print_params()
+    # dyanamics._compute_drag(torch.tensor([1.0, 1.0, 1.0]), torch.tensor([[1.0, 0.0, 0.0, 0.0]]))
+    dyanamics._compute_drag(torch.tensor([1.0, 0.0, 0.0], device=device), torch.tensor([[0.9659, 0.0, 0.0, 0.2588]], device=device))
+    # dyanamics._compute_drag(torch.tensor([1.0, 0.0, 0.0], device=device), torch.tensor([[0.7071, 0.0, 0.0, 0.7071]], device=device))

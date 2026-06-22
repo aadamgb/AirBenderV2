@@ -25,25 +25,24 @@ MAX_T     = 20.0
 DT        = 0.01
 TORQUE_C  = 0.012
 
-X_THRESH        = 10.0
-Y_THRESH        = 10.0
+X_THRESH        = 5.0
+Y_THRESH        = 8.0
 Z_THRESH        = 6.0
 GATE_HALF_W     = 0.6
 GATE_HALF_H     = 0.6
-MAX_STEPS       = 1200*2
+MAX_STEPS       = 1200
 
 Y_WIND_MIN = -1.0
 Y_WIND_MAX =  1.0
 DIST_X_DIR = 15.0 # m/s2
 
-TRACK_PATH = "misc/racing_tracks/uzh.yaml"
+TRACK_PATH = "misc/racing_tracks/fig8.yaml"
 PPO_LOG_DIR = "/home/adame/AirBender/outputs/ppo_logs"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GPU-batched vectorised environment  (training)
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ----------------------------------------------------------
+# GPU vectorised environment  (for training)
+# ----------------------------------------------------------
 class QuadrotorVecEnv(VecEnv):
     """
     Fully GPU-batched SB3 VecEnv.  All N environments run in parallel as
@@ -91,9 +90,9 @@ class QuadrotorVecEnv(VecEnv):
             torque_c=TORQUE_C, angle=ANGLE,
         )
 
-        mass, inertia, length, torque_const, angle = self.randomizer.sample(num_envs, randomize=False)
+        # mass, inertia, length, torque_const, angle = self.randomizer.sample(num_envs, randomize=False)
         self.dynamics = QuadrotorDynamics(
-            mass=mass, inertia=inertia, length=length, torque_const=torque_const, angle=angle,
+           *self.randomizer.sample(num_envs, randomize=False),
             gravity=GRAVITY, dt=DT, max_thrust=MAX_T, device=device,
         )
 
@@ -258,10 +257,9 @@ class QuadrotorVecEnv(VecEnv):
         return [seed] * self.num_envs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Single-env gymnasium wrapper  (inference / rendering via test.py)
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ----------------------------------------------------------
+# One env gymnasium wrapper (for testing and rendering)
+# ----------------------------------------------------------
 class QuadrotorEnv(gym.Env):
     """
     Standard single-env gymnasium interface backed by the same PyTorch dynamics
@@ -327,8 +325,7 @@ class QuadrotorEnv(gym.Env):
             self._log_writer = csv.DictWriter(self._log_file, fieldnames=fieldnames)
             self._log_writer.writeheader()
 
-    # ── Gym interface ─────────────────────────────────────────────────────────
-
+    # ----- Gym interface ---------------------
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.dynamics.set_params(*self.randomizer.sample(1))
@@ -352,7 +349,6 @@ class QuadrotorEnv(gym.Env):
 
         self._state = np.zeros(13, dtype=np.float32)
         self._state[0:3] = self._curr_gate_pos + gate_R @ (offset + noise)
-        # self._state[2] = 1.0
         self._state[3:6] = self.np_random.uniform(-0.5, 0.5, 3).astype(np.float32)
         self._state[6]   = 1.0   # identity quaternion
 
@@ -445,7 +441,7 @@ class QuadrotorEnv(gym.Env):
             or p[2] < 0.0 or p[2] > Z_THRESH
             or gate_crash
         )
-        truncated = self._step_count >= MAX_STEPS #or gate_success
+        truncated = self._step_count >= MAX_STEPS 
 
         reward = (
               1.0  * progress
