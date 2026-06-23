@@ -58,7 +58,7 @@ dynamics = QuadrotorDynamics(
 
 renderer = RacingRenderer(gates_pos_np, gates_rpy_np)
 
-states = torch.zeros((num_envs, 13), device=device)
+states = torch.zeros((num_envs, 17), device=device)
 total_timesteps = 0
 ep_rew_buffer = deque(maxlen=100)  # mirrors SB3's ep_info_buffer
 

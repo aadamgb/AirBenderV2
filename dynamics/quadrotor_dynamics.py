@@ -44,18 +44,48 @@ class QuadrotorDynamics:
 
     def propagate(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """
-        state:  (N, 13)
+        state:  (N, 17)
         action: (N,  4) ∈ [0, 1]
         """
-        p, v, q, w = state[:, 0:3], state[:, 3:6], state[:, 6:10], state[:, 10:13]
-        thrust = action * self.max_thrust                                
-        wrench = torch.matmul(self.mixer, thrust.unsqueeze(-1)).squeeze(-1)  
-        f_z, tau = wrench[:, 0], wrench[:, 1:4]
-        f_body = self._compute_drag(v, q)
-        f_body[:, 2] += f_z 
-        p_n, v_n, q_n, w_n = integrate_rk4(self.dt, p, v, q, w, f_body, tau, self.mass, self.J, self.G)
-        return torch.cat([p_n, v_n, q_n, w_n], dim=-1)
+        # Unpack state
+        p   = state[:, 0:3]
+        v   = state[:, 3:6]
+        q   = state[:, 6:10]
+        w   = state[:, 10:13]
+        Omega = state[:, 13:17]
 
+        # Simulate motor delay
+        thrust_cmd = action * self.max_thrust 
+        Omega_n, thrust_n = self._motor_dynamics(Omega, thrust_cmd)
+
+        # Get body forces                          
+        wrench = torch.matmul(self.mixer, thrust_n.unsqueeze(-1)).squeeze(-1)  
+        f_z, tau = wrench[:, 0], wrench[:, 1:4]
+
+        f_drag = self._compute_drag(v, q)
+        f_thrust = torch.zeros_like(f_drag)
+        f_thrust[:, 2] = f_z
+
+        f_body = f_drag + f_thrust
+
+        # Integrate 
+        p_n, v_n, q_n, w_n = integrate_rk4(self.dt, p, v, q, w, f_body, tau, self.mass, self.J, self.G)
+        return torch.cat([p_n, v_n, q_n, w_n, Omega_n], dim=-1)
+    
+    def _compute_drag(self, v, q):
+        R = quat_to_rotmat(q)
+        v_body = (R.transpose(-1, -2) @ v.unsqueeze(-1)).squeeze(-1)
+        f_drag = - 0.5 * self.rho * v_body.abs() * v_body * self.Cd # NOTE: I think Cd is already Cd*area but check with Rob
+        return f_drag
+    
+    def _motor_dynamics(self, Omega, thrust_cmd):
+        a0 = 4.5e-8                                         #TODO: Remove hardcode...
+        Omega_cmd =  torch.sqrt((thrust_cmd / a0).clamp(min=1e-3))
+        Omega_dot = (Omega_cmd - Omega) / self.tau_m
+        Omega_n = Omega + Omega_dot * self.dt
+        thrust_n = a0 * Omega_n **2
+        return Omega_n, thrust_n
+    
     @staticmethod
     def _build_mixer(eta: torch.Tensor, length: torch.Tensor, angle: torch.Tensor, ct: torch.Tensor) -> torch.Tensor:
         """Maps per-motor thrust [u1..u4] → [Fz, τx, τy, τz], built from per-rotor arm length(s)."""
@@ -71,12 +101,6 @@ class QuadrotorDynamics:
         row_ty  = length * c * sign_y
         row_tz  = (ct * sign_z) * torch.ones_like(length)
         return torch.stack([row_Fz, row_tx, row_ty, row_tz], dim=-2)  
-    
-    def _compute_drag(self, v, q):
-        R = quat_to_rotmat(q)
-        v_body = (R.transpose(-1, -2) @ v.unsqueeze(-1)).squeeze(-1)
-        f_drag = - 0.5 * self.rho * v_body.abs() * v_body * self.Cd # NOTE: I think Cd is already Cd*area but check with Rob
-        return f_drag
     
     def set_params(self,
                    mass, inertia, 
@@ -114,11 +138,8 @@ class QuadrotorDynamics:
     def print_params(self) -> None:
         """Prints current physical parameters: mass, inertia (J), arm length, torque constant, and angle."""
         def to_cpu(x):
-            try:
                 return x.detach().cpu().numpy()
-            except Exception:
-                return x
-
+        
         print("Mass:\n", to_cpu(self.mass))
         print("\n Inertia (J):\n", to_cpu(self.J))
         print("\n Length:\n", to_cpu(self.length))

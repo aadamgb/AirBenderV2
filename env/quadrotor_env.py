@@ -98,7 +98,7 @@ class QuadrotorVecEnv(VecEnv):
 
         # Per-env tensors
         N = num_envs
-        self.states     = torch.zeros(N, 13, dtype=torch.float32, device=self.device)
+        self.states     = torch.zeros(N, 17, dtype=torch.float32, device=self.device)
         self.gate_idx   = torch.zeros(N, dtype=torch.long,        device=self.device)
         self.prev_pos   = torch.zeros(N, 3,  dtype=torch.float32, device=self.device)
         self.step_count = torch.zeros(N, dtype=torch.long,        device=self.device)
@@ -128,7 +128,6 @@ class QuadrotorVecEnv(VecEnv):
         offset = torch.tensor([0., -1., 0.], dtype=torch.float32, device=self.device).expand(n, -1)
         noise  = torch.randn(n, 3, dtype=torch.float32, device=self.device) * 0.2
         start  = gate_pos + (gate_R @ (offset + noise).unsqueeze(-1)).squeeze(-1)
-
         self.states[idx]       = 0.0
         self.states[idx, 0:3]  = start
         self.states[idx, 3:6]  = (torch.rand(n, 3, device=self.device) - 0.5)  # vel ∈ [-0.5, 0.5]
@@ -168,7 +167,6 @@ class QuadrotorVecEnv(VecEnv):
     @torch.no_grad()
     def step_wait(self):
         prev_pos = self.states[:, 0:3].clone()
-
         self.states = self.dynamics.propagate(self.states, self._pending_actions)
         self.step_count += 1
 
@@ -321,7 +319,7 @@ class QuadrotorEnv(gym.Env):
                 "reward",
                 "terminated",
                 "truncated",
-            ] + [f"state_{i}" for i in range(13)] + [f"action_{i}" for i in range(4)]
+            ] + [f"state_{i}" for i in range(17)] + [f"action_{i}" for i in range(4)]
             self._log_writer = csv.DictWriter(self._log_file, fieldnames=fieldnames)
             self._log_writer.writeheader()
 
@@ -347,7 +345,7 @@ class QuadrotorEnv(gym.Env):
             self.np_random.normal(0, 0.2),
         ], dtype=np.float32)
 
-        self._state = np.zeros(13, dtype=np.float32)
+        self._state = np.zeros(17, dtype=np.float32)
         self._state[0:3] = self._curr_gate_pos + gate_R @ (offset + noise)
         self._state[3:6] = self.np_random.uniform(-0.5, 0.5, 3).astype(np.float32)
         self._state[6]   = 1.0   # identity quaternion

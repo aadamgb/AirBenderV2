@@ -32,10 +32,10 @@ if __name__ == "__main__":
     checkpoint_callback = CheckpointCallback(
         save_freq=7812,
         save_path="outputs",
-        name_prefix="DragTest",
+        name_prefix="DelayTest",
 
     )
 
     model.learn(total_timesteps=25_000_000, callback=checkpoint_callback)
-    model.save("outputs/DragTest")
+    model.save("outputs/DelayTest")
     env.close()
