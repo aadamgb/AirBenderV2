@@ -11,6 +11,7 @@ from gymnasium import spaces
 from stable_baselines3.common.vec_env import VecEnv
 
 from dynamics.quadrotor_dynamics import QuadrotorDynamics
+from controllers.controllers import CONTROLLERS
 from utils.randomizer import QuadrotorRandomizer
 from utils.math import rpy_to_rotmat, rpy_to_rotmat_np
 from misc.loader import load_gates_from_yaml
@@ -53,7 +54,9 @@ class QuadrotorVecEnv(VecEnv):
     Observation   : (17,)  see _get_obs
     """
 
-    def __init__(self, num_envs: int = 256, device: str = "cuda", track_path: str = TRACK_PATH):
+    def __init__(self, num_envs: int = 256, device: str = "cuda", 
+                 track_path: str = TRACK_PATH,
+                 controller: str = "srt"):
         obs_high = np.array([
             X_THRESH*2, Y_THRESH*2, Z_THRESH*2,           # rel_pos
             40., 40., 40.,                                 # rel_vel
@@ -89,11 +92,14 @@ class QuadrotorVecEnv(VecEnv):
             mass=MASS, inertia=INERTIA, length=LENGTH,
             torque_c=TORQUE_C, angle=ANGLE,
         )
-
-        # mass, inertia, length, torque_const, angle = self.randomizer.sample(num_envs, randomize=False)
         self.dynamics = QuadrotorDynamics(
            *self.randomizer.sample(num_envs, randomize=False),
-            gravity=GRAVITY, dt=DT, max_thrust=MAX_T, device=device,
+            gravity=GRAVITY, dt=DT, device=device,
+        )
+        self.controller = CONTROLLERS[controller](
+            max_thrust=MAX_T,
+            mixer=self.dynamics.mixer[0],
+            device="cuda", 
         )
 
         # Per-env tensors
@@ -137,6 +143,7 @@ class QuadrotorVecEnv(VecEnv):
 
         self.dynamics.set_params(*self.randomizer.sample(n), idx=idx)
         # self.dynamics.print_params()
+        self.controller.reset(mask) 
 
     # ── Observation ───────────────────────────────────────────────────────────
 
@@ -167,7 +174,8 @@ class QuadrotorVecEnv(VecEnv):
     @torch.no_grad()
     def step_wait(self):
         prev_pos = self.states[:, 0:3].clone()
-        self.states = self.dynamics.propagate(self.states, self._pending_actions)
+        thrust_commands = self.controller.map(self.states, self._pending_actions)
+        self.states = self.dynamics.propagate(self.states, thrust_commands)
         self.step_count += 1
 
         p = self.states[:, 0:3]
@@ -267,7 +275,8 @@ class QuadrotorEnv(gym.Env):
     """
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
 
-    def __init__(self, render_mode=None, log_dir: Optional[str] = PPO_LOG_DIR):
+    def __init__(self, render_mode=None, log_dir: Optional[str] = PPO_LOG_DIR,
+                 controller: str = "srt"):
         super().__init__()
         self.render_mode = render_mode
         self._renderer   = None
@@ -289,8 +298,13 @@ class QuadrotorEnv(gym.Env):
         )
         self.dynamics = QuadrotorDynamics(
             *self.randomizer.sample(1, randomize=False), 
-            max_thrust=MAX_T, gravity=GRAVITY, dt=DT,
+            gravity=GRAVITY, dt=DT,
             device="cpu",
+        )
+        self.controller = CONTROLLERS[controller](
+            mixer=self.dynamics.mixer[0], 
+            max_thrust=MAX_T,
+            device="cpu"
         )
 
         obs_high = np.array([
@@ -327,7 +341,7 @@ class QuadrotorEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.dynamics.set_params(*self.randomizer.sample(1))
-        self.dynamics.print_params()
+        # self.dynamics.print_params()
         self._episode_id += 1
         self._step_index = 0
 
@@ -357,6 +371,8 @@ class QuadrotorEnv(gym.Env):
         self._lap_start_step = 0
         self._lap_started = False
         self._lap_count = 0
+        
+        self.controller.reset()
 
         if self._renderer is not None:
             self._renderer.set_target(self.gate_idx)
@@ -393,7 +409,8 @@ class QuadrotorEnv(gym.Env):
         # PyTorch propagation (N=1, CPU)
         state_t  = torch.from_numpy(self._state).unsqueeze(0)   # (1, 13)
         action_t = torch.from_numpy(action.astype(np.float32)).unsqueeze(0)  # (1, 4)
-        self._state = self.dynamics.propagate(state_t, action_t)[0].numpy()
+        thrust_cmd = self.controller.map(state_t, action_t)
+        self._state = self.dynamics.propagate(state_t, thrust_cmd)[0].numpy()
         
         # # Simulating wind disturbance
         # in_zone = (self._state[1] >= Y_WIND_MIN) & (self._state[1] <= Y_WIND_MAX)

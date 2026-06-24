@@ -34,18 +34,17 @@ class QuadrotorDynamics:
     Action : (N,  4)  per-motor thrust fraction ∈ [0, 1]
     """
 
-    def __init__(self, mass, inertia, length, angle, torque_const, tau_m, eta, Cd, rho, max_thrust, gravity, dt, device='cuda'):
-        self.dt = dt
-        self.max_thrust = max_thrust
+    def __init__(self, mass, inertia, length, angle, torque_const, tau_m, eta, Cd, rho, gravity, dt, device='cuda'):
         self.device = torch.device(device if torch.cuda.is_available() or device == 'cpu' else 'cpu')
- 
         self.G = torch.tensor([0., 0., -gravity], dtype=torch.float32, device=self.device)
+        self.dt = dt
+        
         self.set_params(mass, inertia, length, angle, torque_const, tau_m, eta, Cd, rho)
 
-    def propagate(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def propagate(self, state: torch.Tensor, thrust_cmd: torch.Tensor) -> torch.Tensor:
         """
         state:  (N, 17)
-        action: (N,  4) ∈ [0, 1]
+        Rotor Thrusts: (N,  4) 
         """
         # Unpack state
         p   = state[:, 0:3]
@@ -55,7 +54,7 @@ class QuadrotorDynamics:
         Omega = state[:, 13:17]
 
         # Simulate motor delay
-        thrust_cmd = action * self.max_thrust 
+        # thrust_cmd = action * self.max_thrust 
         Omega_n, thrust_n = self._motor_dynamics(Omega, thrust_cmd)
 
         # Get body forces                          

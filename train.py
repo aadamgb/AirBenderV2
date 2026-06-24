@@ -3,12 +3,15 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from env.quadrotor_env import QuadrotorVecEnv
+from controllers.controllers import *
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Training on {device}")
 
-    env = QuadrotorVecEnv(num_envs=100, device=device)
+    env = QuadrotorVecEnv(
+        num_envs=100, 
+        controller="px4v2", 
+        device=device)
 
     policy_kwargs = dict(
         activation_fn=torch.nn.ReLU,
@@ -32,10 +35,10 @@ if __name__ == "__main__":
     checkpoint_callback = CheckpointCallback(
         save_freq=7812,
         save_path="outputs",
-        name_prefix="DelayTest",
+        name_prefix="px4v2",
 
     )
 
-    model.learn(total_timesteps=25_000_000, callback=checkpoint_callback)
-    model.save("outputs/DelayTest")
+    model.learn(total_timesteps=100_000_000, callback=checkpoint_callback)
+    model.save("outputs/px4v2")
     env.close()
