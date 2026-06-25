@@ -54,7 +54,6 @@ class QuadrotorDynamics:
         Omega = state[:, 13:17]
 
         # Simulate motor delay
-        # thrust_cmd = action * self.max_thrust 
         Omega_n, thrust_n = self._motor_dynamics(Omega, thrust_cmd)
 
         # Get body forces                          
@@ -78,7 +77,8 @@ class QuadrotorDynamics:
         return f_drag
     
     def _motor_dynamics(self, Omega, thrust_cmd):
-        a0 = 4.5e-8                                         #TODO: Remove hardcode...
+        # a0 = 4.5e-8                                     #TODO: Remove hardcode...
+        a0 = 4e-6                                         #TODO: Remove hardcode...
         Omega_cmd =  torch.sqrt((thrust_cmd / a0).clamp(min=1e-3))
         Omega_dot = (Omega_cmd - Omega) / self.tau_m
         Omega_n = Omega + Omega_dot * self.dt

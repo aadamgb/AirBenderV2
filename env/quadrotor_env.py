@@ -340,8 +340,8 @@ class QuadrotorEnv(gym.Env):
     # ----- Gym interface ---------------------
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.dynamics.set_params(*self.randomizer.sample(1))
-        # self.dynamics.print_params()
+        self.dynamics.set_params(*self.randomizer.sample(1, randomize=True))
+        self.dynamics.print_params()
         self._episode_id += 1
         self._step_index = 0
 

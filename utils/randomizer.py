@@ -1,5 +1,4 @@
 import torch
-
 class QuadrotorRandomizer:
     def __init__(self,
                  mass:      float = 1.21,  
@@ -9,7 +8,7 @@ class QuadrotorRandomizer:
                  torque_c:  float = 0.012, 
                  tau_m:     float = 0.05, 
                  eta:       float = 1.0,
-                 Cd:        float = (0.28, 0.35, 0.70),
+                 Cd:        float = (0.28, 0.35, 0.7),
                  rho:       float = 1.225,
                  p:         float = 0.2, 
                  device='cuda',
@@ -40,7 +39,6 @@ class QuadrotorRandomizer:
             eta_nom = eta_nom.expand(4)
         self.eta_nom = eta_nom.clone()  
                        
-
     def _uniform_multiplicative(self, nominal: torch.Tensor, n: int, randomize: bool, p: float) -> torch.Tensor:
             out = nominal.expand((n,) + tuple(nominal.shape)).clone()
             if randomize and p > 0:
@@ -51,7 +49,7 @@ class QuadrotorRandomizer:
     def _uniform_additive(self, nominal: torch.Tensor, n: int, randomize: bool, p: float) -> torch.Tensor:
         out = nominal.expand((n,) + tuple(nominal.shape)).clone()
         if randomize and p > 0:
-            delta = (2.0 * torch.rand_like(out) - 1.0) * p  # U[-p, +p]
+            delta = (2.0 * torch.rand_like(out) - 1.0) * p             # U[-p, +p]
             out = out + delta
         return out
 
