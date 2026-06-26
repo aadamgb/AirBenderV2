@@ -78,7 +78,7 @@ class QuadrotorDynamics:
     
     def _motor_dynamics(self, Omega, thrust_cmd):
         # a0 = 4.5e-8                                     #TODO: Remove hardcode...
-        a0 = 4e-6                                         #TODO: Remove hardcode...
+        a0 = 4e-6                                         #NOTE: a0 is actually arbitrary here
         Omega_cmd =  torch.sqrt((thrust_cmd / a0).clamp(min=1e-3))
         Omega_dot = (Omega_cmd - Omega) / self.tau_m
         Omega_n = Omega + Omega_dot * self.dt

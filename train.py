@@ -10,7 +10,7 @@ if __name__ == "__main__":
 
     env = QuadrotorVecEnv(
         num_envs=100, 
-        controller="px4v2", 
+        controller="px4", 
         device=device)
 
     policy_kwargs = dict(
@@ -35,10 +35,10 @@ if __name__ == "__main__":
     checkpoint_callback = CheckpointCallback(
         save_freq=7812,
         save_path="outputs",
-        name_prefix="px4v2",
+        name_prefix="px4-20dr-0.02dt",
 
     )
 
     model.learn(total_timesteps=100_000_000, callback=checkpoint_callback)
-    model.save("outputs/px4v2")
+    model.save("outputs/px4-20dr-0.02dt")
     env.close()

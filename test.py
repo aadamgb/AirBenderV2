@@ -2,7 +2,8 @@ import time
 from stable_baselines3 import PPO
 from env.quadrotor_env import QuadrotorEnv
 
-model = PPO.load("outputs/px4v2_good")
+model = PPO.load("outputs/px4-20dr-0.02dt_21M")
+# model = PPO.load("outputs/px4v2")
 
 env = QuadrotorEnv(render_mode="human", controller="px4")
 obs, _ = env.reset()

@@ -38,6 +38,8 @@ def rpy_to_rotmat(rpy_deg: torch.Tensor) -> torch.Tensor:
     Rz = torch.stack([torch.stack([cy, -sy, z], -1), torch.stack([sy, cy,   z], -1), torch.stack([z,  z,  o], -1)], -2)
     return Rz @ Ry @ Rx
 
+def vee(M):  # (N,3,3) skew -> (N,3)
+    return torch.stack([M[:, 2, 1], M[:, 0, 2], M[:, 1, 0]], dim=-1)
 
 # ── NumPy (single-sample, used by QuadrotorEnv and renderer) ─────────────────
 

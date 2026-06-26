@@ -1,5 +1,6 @@
 import math
 import torch
+from utils.math import quat_to_rotmat, vee
 class BaseController:
     def map(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -11,7 +12,7 @@ class SRT(BaseController):
     def __init__(self, max_thrust, **kwargs): 
         self.max_thrust = max_thrust
         
-    def map(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def map(self, state: torch.Tensor, action: torch.Tensor,  **kwargs) -> torch.Tensor:
         return action * self.max_thrust
     
 class px4CTBR(BaseController):
@@ -149,7 +150,88 @@ class px4CTBR(BaseController):
         # the 2x-1 / 0.5x+0.5 round-trip collapses to a clamp
         return outputs.clamp(0.0, 1.0)
 
+class so3VelCTBR(BaseController):
+    """
+    Outer geometric loop: policy outputs (velocity_cmd[3], heading_rate[1]) in [0,1].
+    Produces a CTBR action and delegates to an inner rate controller (px4CTBRv2),
+    so the rate loop + mixer match deployment exactly.
+    """
+    def __init__(self,
+                 mixer,
+                 max_thrust,
+                 mass,
+                 gravity,
+                 max_rates   = (6.0, 6.0, 3.0),
+                 v_max       = (10.0, 10.0, 3.0),    # decode scale for velocity cmd
+                 yawrate_max = 3.0,                # decode scale for heading rate
+                 k_v         = (3.0, 3.0, 4.0),    # velocity P gain
+                 k_R         = (8.0, 8.0, 1.0),    # attitude P gain -> body rate
+                 inner       = None,
+                 device      = "cuda",
+                 **kwargs):
+        self.device     = device
+        self.mass       = mass
+        self.g          = gravity
+        self.max_thrust = max_thrust
+        self.max_rates  = torch.tensor(max_rates, dtype=torch.float32, device=device)
+        self.v_max      = torch.tensor(v_max,     dtype=torch.float32, device=device)
+        self.yawrate_max = yawrate_max
+        self.k_v        = torch.tensor(k_v, dtype=torch.float32, device=device)
+        self.k_R        = torch.tensor(k_R, dtype=torch.float32, device=device)
+        self.inner      = inner if inner is not None else \
+                          px4CTBR(mixer, max_thrust, max_rates=max_rates, device=device)
+
+    def reset(self, env_mask=None):
+        self.inner.reset(env_mask)   # stateless outer loop, nothing else to clear
+
+    def map(self, state, action, dt: float = 0.01):
+        N = state.shape[0]
+        v = state[:, 3:6]                       # world-frame velocity
+        R = quat_to_rotmat(state[:, 6:10])      # (N,3,3)
+
+        # decode policy action ([0,1] -> physical)
+        v_cmd    = (2.0 * action[:, 0:3] - 1.0) * self.v_max          # world frame
+        yaw_rate = (2.0 * action[:, 3:4] - 1.0) * self.yawrate_max    # (N,1)
+
+        e3 = torch.zeros(N, 3, device=self.device); e3[:, 2] = 1.0
+
+        # --- translational: velocity error -> desired specific thrust (world) ---
+        e_v     = v_cmd - v
+        acc_des = self.k_v * e_v + self.g * e3                         # (N,3)
+
+        # --- desired body-z + collective force (Lee projection onto current b3) ---
+        b3_des = acc_des / acc_des.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        b3     = R[:, :, 2]
+        f_coll = (self.mass * (acc_des * b3).sum(-1, keepdim=True)).clamp_min(0.0)
+
+        # --- desired attitude: b1 from CURRENT heading (decoupled yaw) ---
+        yaw  = torch.atan2(R[:, 1, 0], R[:, 0, 0])
+        b1_c = torch.stack([torch.cos(yaw), torch.sin(yaw), torch.zeros_like(yaw)], dim=-1)
+        b2_des = torch.cross(b3_des, b1_c, dim=-1)
+        b2_des = b2_des / b2_des.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        b1_des = torch.cross(b2_des, b3_des, dim=-1)
+        R_des  = torch.stack([b1_des, b2_des, b3_des], dim=-1)         # columns
+
+        # --- SO(3) attitude error -> body-rate command ---
+        e_R = vee(0.5 * (R_des.transpose(1, 2) @ R - R.transpose(1, 2) @ R_des))
+
+        # heading-rate feedforward: world yaw rate rotated into body frame
+        w_des_world = torch.cat([torch.zeros(N, 2, device=self.device), yaw_rate], dim=-1)
+        w_ff = (R.transpose(1, 2) @ R_des @ w_des_world.unsqueeze(-1)).squeeze(-1)
+
+        omega_cmd = -self.k_R * e_R + w_ff                            # (N,3) rad/s
+
+        # --- encode as CTBR action for the inner rate loop ---
+        a0      = (f_coll / (4.0 * self.max_thrust)).clamp(0.0, 1.0)
+        a_rates = ((omega_cmd / self.max_rates + 1.0) * 0.5).clamp(0.0, 1.0)
+        ctbr_action = torch.cat([a0, a_rates], dim=-1)                # (N,4)
+
+        return self.inner.map(state, ctbr_action, dt=dt)
+
+
+
 CONTROLLERS = {
     "srt":  SRT,
     "px4" : px4CTBR,
+    "so3" : so3VelCTBR,
 }

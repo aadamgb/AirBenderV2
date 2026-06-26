@@ -16,50 +16,46 @@ from utils.randomizer import QuadrotorRandomizer
 from utils.math import rpy_to_rotmat, rpy_to_rotmat_np
 from misc.loader import load_gates_from_yaml
 
-# ── Shared physics / track constants ─────────────────────────────────────────
 GRAVITY   = 9.81
 MASS      = 1.21
 INERTIA   = (0.007, 0.007, 0.013)
 LENGTH    = 0.15
 ANGLE     = 45.0
 MAX_T     = 20.0
-DT        = 0.01
 TORQUE_C  = 0.012
+
+DT_INT        = 0.001   
+DT_RATE       = 0.004   
+DT_POLICY_MIN = 0.01  
+DT_POLICY_MAX = 0.03
+DT            = 0.015    
+MAX_TIME      = 12.0  # seconds
 
 X_THRESH        = 5.0
 Y_THRESH        = 8.0
 Z_THRESH        = 6.0
 GATE_HALF_W     = 0.6
 GATE_HALF_H     = 0.6
-MAX_STEPS       = 1200
-
-Y_WIND_MIN = -1.0
-Y_WIND_MAX =  1.0
-DIST_X_DIR = 15.0 # m/s2
 
 TRACK_PATH = "misc/racing_tracks/fig8.yaml"
 PPO_LOG_DIR = "/home/adame/AirBender/outputs/ppo_logs"
 
+# Unused
+Y_WIND_MIN = -1.0
+Y_WIND_MAX =  1.0
+DIST_X_DIR = 15.0 # m/s2
 
 # ----------------------------------------------------------
 # GPU vectorised environment  (for training)
 # ----------------------------------------------------------
 class QuadrotorVecEnv(VecEnv):
-    """
-    Fully GPU-batched SB3 VecEnv.  All N environments run in parallel as
-    batched tensor ops on `device`.  No subprocess overhead.
-
-    State per env : (13,)  [p(3) | v(3) | q(4) | ω(3)]
-    Action        : (4,)   per-motor thrust fraction ∈ [0, 1]
-    Observation   : (17,)  see _get_obs
-    """
-
     def __init__(self, num_envs: int = 256, device: str = "cuda", 
                  track_path: str = TRACK_PATH,
                  controller: str = "srt"):
+        
         obs_high = np.array([
             X_THRESH*2, Y_THRESH*2, Z_THRESH*2,           # rel_pos
-            40., 40., 40.,                                 # rel_vel
+            40., 40., 40.,                                # rel_vel
             1., 1., 1., 1.,                               # q
             np.finfo(np.float32).max,
             np.finfo(np.float32).max,
@@ -76,7 +72,6 @@ class QuadrotorVecEnv(VecEnv):
 
         self.device = torch.device(device if (device != "cuda" or torch.cuda.is_available()) else "cpu")
 
-        # Gate data (precomputed, static)
         gates_pos_np, gates_rpy_np = load_gates_from_yaml(track_path)
         self.n_gates  = len(gates_pos_np)
         gates_pos_t   = torch.tensor(gates_pos_np, dtype=torch.float32, device=self.device)
@@ -91,23 +86,27 @@ class QuadrotorVecEnv(VecEnv):
         self.randomizer = QuadrotorRandomizer(
             mass=MASS, inertia=INERTIA, length=LENGTH,
             torque_c=TORQUE_C, angle=ANGLE,
+            p=0.2  # 20% Domain Randomization
         )
         self.dynamics = QuadrotorDynamics(
            *self.randomizer.sample(num_envs, randomize=False),
-            gravity=GRAVITY, dt=DT, device=device,
+            gravity=GRAVITY, dt=DT_INT, device=device,
         )
         self.controller = CONTROLLERS[controller](
             max_thrust=MAX_T,
+            mass=MASS,
+            gravity=GRAVITY,
             mixer=self.dynamics.mixer[0],
             device="cuda", 
         )
 
         # Per-env tensors
         N = num_envs
-        self.states     = torch.zeros(N, 17, dtype=torch.float32, device=self.device)
-        self.gate_idx   = torch.zeros(N, dtype=torch.long,        device=self.device)
-        self.prev_pos   = torch.zeros(N, 3,  dtype=torch.float32, device=self.device)
-        self.step_count = torch.zeros(N, dtype=torch.long,        device=self.device)
+        self.states       = torch.zeros(N, 17, dtype=torch.float32, device=self.device)
+        self.gate_idx     = torch.zeros(N, dtype=torch.long,        device=self.device)
+        self.prev_pos     = torch.zeros(N, 3,  dtype=torch.float32, device=self.device)
+        self.step_count   = torch.zeros(N, dtype=torch.long,        device=self.device)
+        self.elapsed_time = torch.zeros(N, dtype=torch.float32, device=self.device)
 
         self._pending_actions: Optional[torch.Tensor] = None
 
@@ -115,8 +114,6 @@ class QuadrotorVecEnv(VecEnv):
 
         self.episode_returns = torch.zeros(self.num_envs, device=self.device)
         self.episode_lengths = torch.zeros(self.num_envs, device=self.device, dtype=torch.int64)
-
-    # ── Reset helpers ─────────────────────────────────────────────────────────
 
     def _reset_envs(self, mask: torch.Tensor) -> None:
         """Reset the environments where mask[i] is True."""
@@ -128,8 +125,8 @@ class QuadrotorVecEnv(VecEnv):
         gate_ids = torch.randint(0, self.n_gates, (n,), device=self.device)
         self.gate_idx[idx] = gate_ids
 
-        gate_R   = self.gates_R[gate_ids]    # (n, 3, 3)
-        gate_pos = self.gates_pos[gate_ids]  # (n, 3)
+        gate_R   = self.gates_R[gate_ids]    
+        gate_pos = self.gates_pos[gate_ids]  
 
         offset = torch.tensor([0., -1., 0.], dtype=torch.float32, device=self.device).expand(n, -1)
         noise  = torch.randn(n, 3, dtype=torch.float32, device=self.device) * 0.2
@@ -140,29 +137,27 @@ class QuadrotorVecEnv(VecEnv):
         self.states[idx, 6]    = 1.0   # qw = 1 (identity rotation)
         self.prev_pos[idx]     = 0.0
         self.step_count[idx]   = 0
+        self.elapsed_time[idx] = 0.0
 
         self.dynamics.set_params(*self.randomizer.sample(n), idx=idx)
-        # self.dynamics.print_params()
         self.controller.reset(mask) 
-
-    # ── Observation ───────────────────────────────────────────────────────────
+        # self.dynamics.print_params()
 
     @torch.no_grad()
     def _get_obs(self) -> np.ndarray:
         p, v, q, w = self.states[:, 0:3], self.states[:, 3:6], self.states[:, 6:10], self.states[:, 10:13]
-        gate_R   = self.gates_R[self.gate_idx]      # (N, 3, 3)
-        gate_pos = self.gates_pos[self.gate_idx]    # (N, 3)
-        RT       = gate_R.transpose(-1, -2)         # (N, 3, 3)
+        gate_R   = self.gates_R[self.gate_idx]      
+        gate_pos = self.gates_pos[self.gate_idx]    
+        RT       = gate_R.transpose(-1, -2)         
 
-        rel_pos    = (RT @ (p - gate_pos).unsqueeze(-1)).squeeze(-1)  # (N, 3)
-        rel_vel    = (RT @ v.unsqueeze(-1)).squeeze(-1)                # (N, 3)
-        gate_norm  = self.gates_normal[self.gate_idx]                  # (N, 3)
-        gate_idx_f = self.gate_idx.float().unsqueeze(-1)               # (N, 1)
+        rel_pos    = (RT @ (p - gate_pos).unsqueeze(-1)).squeeze(-1)  
+        rel_vel    = (RT @ v.unsqueeze(-1)).squeeze(-1)               
+        gate_norm  = self.gates_normal[self.gate_idx]                  
+        gate_idx_f = self.gate_idx.float().unsqueeze(-1)              
 
         obs = torch.cat([rel_pos, rel_vel, q, w, gate_pos, gate_norm, gate_idx_f], dim=-1)
         return obs.cpu().numpy().astype(np.float32)
 
-    # ── VecEnv interface ──────────────────────────────────────────────────────
 
     def reset(self) -> np.ndarray:
         self._reset_envs(torch.ones(self.num_envs, dtype=torch.bool, device=self.device))
@@ -174,8 +169,17 @@ class QuadrotorVecEnv(VecEnv):
     @torch.no_grad()
     def step_wait(self):
         prev_pos = self.states[:, 0:3].clone()
-        thrust_commands = self.controller.map(self.states, self._pending_actions)
-        self.states = self.dynamics.propagate(self.states, thrust_commands)
+
+        control_dt   = float(np.random.uniform(DT_POLICY_MIN, DT_POLICY_MAX)) # randomize control freq 83-125 Hz
+        n_rate_steps = round(control_dt / DT_RATE)     # 250 Hz inner loop, 2–5 steps
+        n_int_steps  = round(DT_RATE / DT_INT)         # = 4, integration @ 1000 Hz
+
+        for _ in range(n_rate_steps):
+            thrust_commands = self.controller.map(self.states, self._pending_actions, dt=DT_RATE)
+            for _ in range(n_int_steps):
+                self.states = self.dynamics.propagate(self.states, thrust_commands)
+
+        self.elapsed_time += n_rate_steps * DT_RATE    # true integrated time
         self.step_count += 1
 
         p = self.states[:, 0:3]
@@ -185,8 +189,8 @@ class QuadrotorVecEnv(VecEnv):
         gate_pos = self.gates_pos[self.gate_idx]
         RT       = gate_R.transpose(-1, -2)
 
-        prev_rel = (RT @ (prev_pos - gate_pos).unsqueeze(-1)).squeeze(-1)  # (N, 3)
-        curr_rel = (RT @ (p       - gate_pos).unsqueeze(-1)).squeeze(-1)   # (N, 3)
+        prev_rel = (RT @ (prev_pos - gate_pos).unsqueeze(-1)).squeeze(-1)  
+        curr_rel = (RT @ (p       - gate_pos).unsqueeze(-1)).squeeze(-1)   
 
         progress      =  prev_rel.norm(dim=-1) - curr_rel.norm(dim=-1)  
         plane_crossed = (prev_rel[:, 1] < 0.0) & (curr_rel[:, 1] >= 0.0)
@@ -204,7 +208,7 @@ class QuadrotorVecEnv(VecEnv):
             (p[:, 2] > Z_THRESH)       |
             gate_crash
         )
-        truncated = (self.step_count >= MAX_STEPS)
+        truncated = (self.elapsed_time >= MAX_TIME)
         dones     = terminated | truncated
 
         rewards = (
@@ -286,6 +290,7 @@ class QuadrotorEnv(gym.Env):
         self._log_writer = None
         self._episode_id = -1
         self._step_index = 0
+        self._elapsed_time = 0
 
         gates_pos_np, gates_rpy_np = load_gates_from_yaml(TRACK_PATH)
         self.gates_position = gates_pos_np   # (G, 3) numpy, kept for renderer
@@ -298,10 +303,12 @@ class QuadrotorEnv(gym.Env):
         )
         self.dynamics = QuadrotorDynamics(
             *self.randomizer.sample(1, randomize=False), 
-            gravity=GRAVITY, dt=DT,
+            gravity=GRAVITY, dt=DT_INT,
             device="cpu",
         )
         self.controller = CONTROLLERS[controller](
+            mass=MASS,
+            gravity=GRAVITY,
             mixer=self.dynamics.mixer[0], 
             max_thrust=MAX_T,
             device="cpu"
@@ -369,8 +376,10 @@ class QuadrotorEnv(gym.Env):
         self._stop_simulation = False
         self._lap_start_gate_idx = self.gate_idx
         self._lap_start_step = 0
+        self._lap_start_time = 0
         self._lap_started = False
         self._lap_count = 0
+        self._elapsed_time = 0
         
         self.controller.reset()
 
@@ -386,7 +395,7 @@ class QuadrotorEnv(gym.Env):
         row = {
             "episode": self._episode_id,
             "step": self._step_index,
-            "time_s": float(self._step_index * DT),
+            "time_s": float(self._elapsed_time),
             "gate_idx": int(self.gate_idx),
             "reward": float(reward),
             "terminated": int(bool(terminated)),
@@ -406,17 +415,27 @@ class QuadrotorEnv(gym.Env):
             self.render()
             return self._get_obs(), 0.0, False, False, {}
 
-        # PyTorch propagation (N=1, CPU)
-        state_t  = torch.from_numpy(self._state).unsqueeze(0)   # (1, 13)
-        action_t = torch.from_numpy(action.astype(np.float32)).unsqueeze(0)  # (1, 4)
-        thrust_cmd = self.controller.map(state_t, action_t)
-        self._state = self.dynamics.propagate(state_t, thrust_cmd)[0].numpy()
-        
+        state_t  = torch.from_numpy(self._state).unsqueeze(0)
+        action_t = torch.from_numpy(action.astype(np.float32)).unsqueeze(0)
+
+        control_dt   = np.random.uniform(DT_POLICY_MIN, DT_POLICY_MAX)
+        n_rate_steps = round(control_dt / DT_RATE)
+        n_int_steps  = round(DT_RATE / DT_INT)         # = 4
+
+        for _ in range(n_rate_steps):
+            thrust_cmd = self.controller.map(state_t, action_t, dt=DT_RATE)
+            for _ in range(n_int_steps):
+                state_t = self.dynamics.propagate(state_t, thrust_cmd)
+        self._state = state_t[0].numpy()
+
+        self._elapsed_time += n_rate_steps * DT_RATE
+        # self._last_step_dt = n_rate_steps * DT_RATE
+
         # # Simulating wind disturbance
         # in_zone = (self._state[1] >= Y_WIND_MIN) & (self._state[1] <= Y_WIND_MAX)
         # self._state[in_zone, 3] -= DIST_X_DIR * DT 
 
-        self._step_count += 1
+        # self._step_count += 1
         p = self._state[0:3]
         w = self._state[10:13]
 
@@ -436,16 +455,17 @@ class QuadrotorEnv(gym.Env):
             if not self._lap_started:
                 self._lap_started = True
                 self._lap_start_gate_idx = self.gate_idx
-                self._lap_start_step = self._step_count
+                # self._lap_start_step = self._step_count
+                self._lap_start_time = self._elapsed_time
             elif self.gate_idx == self._lap_start_gate_idx:
                 self._lap_count += 1
-                lap_time = (self._step_count - self._lap_start_step) * DT
-                print(f"Lap {self._lap_count}: {lap_time:.2f} s")
-                self._lap_start_step = self._step_count
+                lap_time = self._elapsed_time - self._lap_start_time
+                print(f"Lap {self._lap_count} time: {lap_time:.2f} s")
+                # self._lap_start_step = self._step_count
+                self._lap_start_time = self._elapsed_time
             self.gate_idx       = (self.gate_idx + 1) % len(self.gates_position)
             self._curr_gate_pos = self.gates_position[self.gate_idx]
             self._curr_gate_rpy = self.gates_rpy[self.gate_idx]
-            # progress            = 0.0
             
             if self._renderer is not None:
                 self._renderer.set_target(self.gate_idx)
@@ -456,7 +476,7 @@ class QuadrotorEnv(gym.Env):
             or p[2] < 0.0 or p[2] > Z_THRESH
             or gate_crash
         )
-        truncated = self._step_count >= MAX_STEPS 
+        truncated = self._elapsed_time >= MAX_TIME
 
         reward = (
               1.0  * progress
