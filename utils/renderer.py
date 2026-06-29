@@ -65,7 +65,7 @@ class BaseRenderer:
             [-c,  s, 0],
             [ c,  s, 0],
             [-c, -s, 0],
-        ], dtype=np.float32)                        # (4, 3)
+        ], dtype=np.float32)                       
 
         ti.init(arch=ti.cpu)
 
@@ -90,7 +90,7 @@ class BaseRenderer:
 
         self._step_count = 0
 
-    # ── Ground ────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
 
     def _build_ground(self):
         grid_n    = 10
@@ -136,7 +136,7 @@ class BaseRenderer:
                 self._ground_i[ib+2] = vb+2;   self._ground_i[ib+3] = vb+1
                 self._ground_i[ib+4] = vb+3;   self._ground_i[ib+5] = vb+2
 
-    # ── World axes ────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
 
     def _build_world_axes(self):
         s = self._axis_scale
@@ -148,7 +148,7 @@ class BaseRenderer:
             self._world_axis_verts[i][0] = ti.Vector([0.0, 0.0, 0.0])
             self._world_axis_verts[i][1] = ti.Vector(tips[i])
 
-    # ── Extension points ──────────────────────────────────────────────────
+    # ------------------------------------------------------------------
 
     def _draw_extras(self, scene):
         pass
@@ -166,7 +166,7 @@ class BaseRenderer:
             self._canvas = self._window.get_canvas()
             self._scene = self._window.get_scene()
 
-    # ── Main API ──────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
 
     def step(self, state: np.ndarray) -> bool:
         """
@@ -198,13 +198,13 @@ class BaseRenderer:
         self._body_pos[0] = origin
 
         bases_enu = self._axis_scale * np.eye(3, dtype=np.float32)
-        tips_enu  = p + (R @ bases_enu.T).T                        # (3, 3)
+        tips_enu  = p + (R @ bases_enu.T).T                        
         tips_ti   = enu_to_ti(tips_enu)
         for i in range(3):
             self._body_axis_verts[i][0] = origin
             self._body_axis_verts[i][1] = ti.Vector(tips_ti[i].tolist())
 
-        arm_tips_enu = p + (R @ self._arm_dirs_body.T).T           # (4, 3)
+        arm_tips_enu = p + (R @ self._arm_dirs_body.T).T           
         arm_tips_ti  = enu_to_ti(arm_tips_enu)
         for i in range(4):
             tip = ti.Vector(arm_tips_ti[i].tolist())
@@ -266,8 +266,8 @@ class PosCtrlRenderer(BaseRenderer):
 
     def __init__(
         self,
-        target:      np.ndarray,        # (3,) ENU target position
-        bounds:      tuple = (3.5, 2.5, 2.5),  # (x, y, z) half-extents
+        target:      np.ndarray,        
+        bounds:      tuple = (3.5, 2.5, 2.5),  
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -289,7 +289,7 @@ class PosCtrlRenderer(BaseRenderer):
             [-bx, -by,  bz], [ bx, -by,  bz],
             [ bx,  by,  bz], [-bx,  by,  bz],
         ], dtype=np.float32)
-        c = enu_to_ti(corners_enu)  # (8, 3)
+        c = enu_to_ti(corners_enu)  
 
         edges = [
             (0,1),(1,2),(2,3),(3,0),  # bottom face
@@ -389,7 +389,7 @@ class RacingRenderer(BaseRenderer):
         for g in range(N):
             R          = self._rpy_to_rotmat(gates_rpy[g])     
             origin_enu = gates_position[g]
-            tips_enu   = origin_enu + (R @ axis_dirs.T).T      # (3, 3)
+            tips_enu   = origin_enu + (R @ axis_dirs.T).T      
 
             origin_ti  = enu_to_ti(origin_enu[None])[0]
             tips_ti    = enu_to_ti(tips_enu)

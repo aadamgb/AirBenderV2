@@ -30,7 +30,7 @@ class QuadrotorDynamics:
     """
     Batched rigid-body quadrotor dynamics on a chosen torch device.
 
-    State  : (N, 13)  [p(3) | v(3) | q(4) | ω(3)]
+    State  : (N, 17)  [p(3) | v(3) | q(4) | w(3), Omega(4)]
     Action : (N,  4)  per-motor thrust fraction ∈ [0, 1]
     """
 
@@ -77,8 +77,7 @@ class QuadrotorDynamics:
         return f_drag
     
     def _motor_dynamics(self, Omega, thrust_cmd):
-        # a0 = 4.5e-8                                     #TODO: Remove hardcode...
-        a0 = 4e-6                                         #NOTE: a0 is actually arbitrary here
+        a0 = 4e-6                                         # NOTE: a0 is actually arbitrary here
         Omega_cmd =  torch.sqrt((thrust_cmd / a0).clamp(min=1e-3))
         Omega_dot = (Omega_cmd - Omega) / self.tau_m
         Omega_n = Omega + Omega_dot * self.dt
@@ -135,10 +134,8 @@ class QuadrotorDynamics:
             self.mixer[idx]         = mixer
 
     def print_params(self) -> None:
-        """Prints current physical parameters: mass, inertia (J), arm length, torque constant, and angle."""
         def to_cpu(x):
                 return x.detach().cpu().numpy()
-        
         print("Mass:\n", to_cpu(self.mass))
         print("\n Inertia (J):\n", to_cpu(self.J))
         print("\n Length:\n", to_cpu(self.length))

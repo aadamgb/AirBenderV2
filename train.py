@@ -8,9 +8,11 @@ from controllers.controllers import *
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    name = "so3-30dr-lazy"
+
     env = QuadrotorVecEnv(
         num_envs=100, 
-        controller="px4", 
+        controller="so3", 
         device=device)
 
     policy_kwargs = dict(
@@ -35,10 +37,10 @@ if __name__ == "__main__":
     checkpoint_callback = CheckpointCallback(
         save_freq=7812,
         save_path="outputs",
-        name_prefix="px4-20dr-0.02dt",
+        name_prefix=name,
 
     )
 
     model.learn(total_timesteps=100_000_000, callback=checkpoint_callback)
-    model.save("outputs/px4-20dr-0.02dt")
+    model.save(name)
     env.close()

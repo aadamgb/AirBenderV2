@@ -24,16 +24,23 @@ ANGLE     = 45.0
 MAX_T     = 20.0
 TORQUE_C  = 0.012
 
+DT_INT        = 0.01  #0.001   
+DT_RATE       = 0.01  #0.004   
+DT_NOM        = 0.01  #0.015
+
 DT_INT        = 0.001   
 DT_RATE       = 0.004   
-DT_POLICY_MIN = 0.01  
-DT_POLICY_MAX = 0.03
-DT            = 0.015    
-MAX_TIME      = 12.0  # seconds
+DT_NOM        = 0.012
+
+# DT_POLICY_MIN = 0.008  
+# DT_POLICY_MAX = 0.02 
+
+MAX_TIME      = 12.0  # [s]
 
 X_THRESH        = 5.0
 Y_THRESH        = 8.0
 Z_THRESH        = 6.0
+
 GATE_HALF_W     = 0.6
 GATE_HALF_H     = 0.6
 
@@ -67,6 +74,8 @@ class QuadrotorVecEnv(VecEnv):
 
         observation_space = spaces.Box(-obs_high, obs_high, dtype=np.float32)
         action_space      = spaces.Box(0.0, 1.0, shape=(4,), dtype=np.float32)
+        # action_space      = spaces.Box(0.0, 1.0, shape=(10,), dtype=np.float32) # Adaptive SO(3)
+
         self.render_mode  = None
         super().__init__(num_envs, observation_space, action_space)
 
@@ -86,7 +95,7 @@ class QuadrotorVecEnv(VecEnv):
         self.randomizer = QuadrotorRandomizer(
             mass=MASS, inertia=INERTIA, length=LENGTH,
             torque_c=TORQUE_C, angle=ANGLE,
-            p=0.2  # 20% Domain Randomization
+            p=0.3  # DR percentage
         )
         self.dynamics = QuadrotorDynamics(
            *self.randomizer.sample(num_envs, randomize=False),
@@ -107,13 +116,15 @@ class QuadrotorVecEnv(VecEnv):
         self.prev_pos     = torch.zeros(N, 3,  dtype=torch.float32, device=self.device)
         self.step_count   = torch.zeros(N, dtype=torch.long,        device=self.device)
         self.elapsed_time = torch.zeros(N, dtype=torch.float32, device=self.device)
+        # self.control_dt = torch.full((N,), DT_NOM, dtype=torch.float32, device=self.device)
 
         self._pending_actions: Optional[torch.Tensor] = None
 
         self._reset_envs(torch.ones(N, dtype=torch.bool, device=self.device))
 
-        self.episode_returns = torch.zeros(self.num_envs, device=self.device)
-        self.episode_lengths = torch.zeros(self.num_envs, device=self.device, dtype=torch.int64)
+        self.episode_returns = torch.zeros(N, device=self.device)
+        self.episode_lengths = torch.zeros(N, device=self.device, dtype=torch.int64)
+
 
     def _reset_envs(self, mask: torch.Tensor) -> None:
         """Reset the environments where mask[i] is True."""
@@ -133,15 +144,17 @@ class QuadrotorVecEnv(VecEnv):
         start  = gate_pos + (gate_R @ (offset + noise).unsqueeze(-1)).squeeze(-1)
         self.states[idx]       = 0.0
         self.states[idx, 0:3]  = start
-        self.states[idx, 3:6]  = (torch.rand(n, 3, device=self.device) - 0.5)  # vel ∈ [-0.5, 0.5]
-        self.states[idx, 6]    = 1.0   # qw = 1 (identity rotation)
+        self.states[idx, 3:6]  = (torch.rand(n, 3, device=self.device) - 0.5)  
+        self.states[idx, 6]    = 1.0   
         self.prev_pos[idx]     = 0.0
         self.step_count[idx]   = 0
         self.elapsed_time[idx] = 0.0
+        # self.control_dt[idx]   = DT_NOM
 
         self.dynamics.set_params(*self.randomizer.sample(n), idx=idx)
         self.controller.reset(mask) 
         # self.dynamics.print_params()
+
 
     @torch.no_grad()
     def _get_obs(self) -> np.ndarray:
@@ -153,7 +166,9 @@ class QuadrotorVecEnv(VecEnv):
         rel_pos    = (RT @ (p - gate_pos).unsqueeze(-1)).squeeze(-1)  
         rel_vel    = (RT @ v.unsqueeze(-1)).squeeze(-1)               
         gate_norm  = self.gates_normal[self.gate_idx]                  
-        gate_idx_f = self.gate_idx.float().unsqueeze(-1)              
+        gate_idx_f = self.gate_idx.float().unsqueeze(-1)      
+
+        # dt_ctrl      = ((self.control_dt - DT_NOM) / (DT_POLICY_MAX - DT_POLICY_MIN)).unsqueeze(-1)
 
         obs = torch.cat([rel_pos, rel_vel, q, w, gate_pos, gate_norm, gate_idx_f], dim=-1)
         return obs.cpu().numpy().astype(np.float32)
@@ -170,17 +185,23 @@ class QuadrotorVecEnv(VecEnv):
     def step_wait(self):
         prev_pos = self.states[:, 0:3].clone()
 
-        control_dt   = float(np.random.uniform(DT_POLICY_MIN, DT_POLICY_MAX)) # randomize control freq 83-125 Hz
-        n_rate_steps = round(control_dt / DT_RATE)     # 250 Hz inner loop, 2–5 steps
-        n_int_steps  = round(DT_RATE / DT_INT)         # = 4, integration @ 1000 Hz
+        n_rate_steps = round(DT_NOM / DT_RATE)   
+        n_int_steps  = round(DT_RATE / DT_INT)  # 4 integration steps per inner control step (0.004 / 0.001 ) 
 
+        # 2-5 inner control steps per policy command 
+        # n_rate_steps = int(np.random.randint(2, 6)) # policy dt is either 0.008, 0.012, 0.016 or 0.02 
+
+        # print("Policy Command")
         for _ in range(n_rate_steps):
             thrust_commands = self.controller.map(self.states, self._pending_actions, dt=DT_RATE)
+            # print("PX4 Step")
             for _ in range(n_int_steps):
                 self.states = self.dynamics.propagate(self.states, thrust_commands)
+                # print("Integration Step")
 
-        self.elapsed_time += n_rate_steps * DT_RATE    # true integrated time
+        self.elapsed_time += n_rate_steps * n_int_steps * DT_INT    # true integrated time
         self.step_count += 1
+        # self.control_dt.fill_(control_dt)
 
         p = self.states[:, 0:3]
         w = self.states[:, 10:13]
@@ -234,6 +255,7 @@ class QuadrotorVecEnv(VecEnv):
                 infos[i]["episode"] = {
                     "r": self.episode_returns[i].item(),
                     "l": self.episode_lengths[i].item(),
+                    "t": self.elapsed_time[i].item(),
                 }
             self.episode_returns[done_idx] = 0
             self.episode_lengths[done_idx] = 0
@@ -288,8 +310,11 @@ class QuadrotorEnv(gym.Env):
         self._log_dir = Path(log_dir) if log_dir is not None else None
         self._log_file = None
         self._log_writer = None
+        self._action_log_file = None
+        self._action_log_writer = None
         self._episode_id = -1
         self._step_index = 0
+        self._global_step = 0
         self._elapsed_time = 0
 
         gates_pos_np, gates_rpy_np = load_gates_from_yaml(TRACK_PATH)
@@ -322,10 +347,12 @@ class QuadrotorEnv(gym.Env):
             100.0, 100.0, 100.0,
             1., 1., 1.,
             float(len(self.gates_position)),
+            # 1.0,
         ], dtype=np.float32)
 
         self.observation_space = spaces.Box(-obs_high, obs_high, dtype=np.float32)
         self.action_space      = spaces.Box(0.0, 1.0, shape=(4,), dtype=np.float32)
+        # self.action_space      = spaces.Box(0.0, 1.0, shape=(10,), dtype=np.float32)
 
         if self._log_dir is not None:
             self._log_dir.mkdir(parents=True, exist_ok=True)
@@ -340,15 +367,21 @@ class QuadrotorEnv(gym.Env):
                 "reward",
                 "terminated",
                 "truncated",
-            ] + [f"state_{i}" for i in range(17)] + [f"action_{i}" for i in range(4)]
+            ] + [f"state_{i}" for i in range(17)] + [f"action_{i}" for i in range(self.action_space.shape[0])]
             self._log_writer = csv.DictWriter(self._log_file, fieldnames=fieldnames)
             self._log_writer.writeheader()
+
+            action_log_path = self._log_dir / "actions.csv"
+            self._action_log_file = open(action_log_path, "w", newline="", encoding="utf-8")
+            action_fieldnames = ["step"] + [f"action_{i}" for i in range(self.action_space.shape[0])]
+            self._action_log_writer = csv.DictWriter(self._action_log_file, fieldnames=action_fieldnames)
+            self._action_log_writer.writeheader()
 
     # ----- Gym interface ---------------------
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.dynamics.set_params(*self.randomizer.sample(1, randomize=True))
-        self.dynamics.print_params()
+        self.dynamics.set_params(*self.randomizer.sample(1, randomize=False))
+        # self.dynamics.print_params()
         self._episode_id += 1
         self._step_index = 0
 
@@ -369,7 +402,7 @@ class QuadrotorEnv(gym.Env):
         self._state = np.zeros(17, dtype=np.float32)
         self._state[0:3] = self._curr_gate_pos + gate_R @ (offset + noise)
         self._state[3:6] = self.np_random.uniform(-0.5, 0.5, 3).astype(np.float32)
-        self._state[6]   = 1.0   # identity quaternion
+        self._state[6]   = 1.0   
 
         self._prev_pos   = self._state[0:3].copy()
         self._step_count = 0
@@ -380,6 +413,7 @@ class QuadrotorEnv(gym.Env):
         self._lap_started = False
         self._lap_count = 0
         self._elapsed_time = 0
+        # self._control_dt = DT_NOM
         
         self.controller.reset()
 
@@ -405,7 +439,15 @@ class QuadrotorEnv(gym.Env):
         row.update({f"action_{i}": float(value) for i, value in enumerate(np.asarray(action, dtype=np.float32).tolist())})
         self._log_writer.writerow(row)
         self._log_file.flush()
+
+        if self._action_log_writer is not None:
+            action_row = {"step": self._global_step}
+            action_row.update({f"action_{i}": float(v) for i, v in enumerate(np.asarray(action, dtype=np.float32).tolist())})
+            self._action_log_writer.writerow(action_row)
+            self._action_log_file.flush()
+
         self._step_index += 1
+        self._global_step += 1
 
     def step(self, action: np.ndarray):
         if self._stop_simulation:
@@ -418,9 +460,13 @@ class QuadrotorEnv(gym.Env):
         state_t  = torch.from_numpy(self._state).unsqueeze(0)
         action_t = torch.from_numpy(action.astype(np.float32)).unsqueeze(0)
 
-        control_dt   = np.random.uniform(DT_POLICY_MIN, DT_POLICY_MAX)
-        n_rate_steps = round(control_dt / DT_RATE)
-        n_int_steps  = round(DT_RATE / DT_INT)         # = 4
+        # control_dt   = np.random.uniform(DT_POLICY_MIN, DT_POLICY_MAX)
+        # self._control_dt = control_dt
+        n_rate_steps = round(DT_NOM / DT_RATE)
+        n_int_steps  = round(DT_RATE / DT_INT)   
+
+        # print(n_rate_steps)      
+        # print(n_int_steps)      
 
         for _ in range(n_rate_steps):
             thrust_cmd = self.controller.map(state_t, action_t, dt=DT_RATE)
@@ -428,8 +474,7 @@ class QuadrotorEnv(gym.Env):
                 state_t = self.dynamics.propagate(state_t, thrust_cmd)
         self._state = state_t[0].numpy()
 
-        self._elapsed_time += n_rate_steps * DT_RATE
-        # self._last_step_dt = n_rate_steps * DT_RATE
+        self._elapsed_time += n_rate_steps * n_int_steps * DT_INT
 
         # # Simulating wind disturbance
         # in_zone = (self._state[1] >= Y_WIND_MIN) & (self._state[1] <= Y_WIND_MAX)
@@ -503,13 +548,16 @@ class QuadrotorEnv(gym.Env):
         RT       = gate_R.T
         rel_pos  = RT @ (p - self._curr_gate_pos)
         rel_vel  = RT @ v
-        gate_norm = gate_R[:, 1]                    # y-axis = forward through gate
+        gate_norm = gate_R[:, 1]                    
+
+        # dt_ctrl      = ((self._control_dt - DT_NOM) / (DT_POLICY_MAX - DT_POLICY_MIN))
 
         return np.concatenate([
             rel_pos, rel_vel, q, w,
             self._curr_gate_pos, 
-            gate_norm, np.array([self.gate_idx], 
-            dtype=np.float32),
+            gate_norm, 
+            np.array([self.gate_idx], dtype=np.float32),
+            # np.array([dt_ctrl], dtype=np.float32),
         ]).astype(np.float32)
 
     def render(self):
@@ -524,7 +572,7 @@ class QuadrotorEnv(gym.Env):
                 arm_length=LENGTH,
                 arm_angle=45.0,
                 mass=MASS,
-                dt=DT,
+                dt=DT_NOM,
             )
         alive = self._renderer.step(self._state)
         if not alive:
@@ -536,6 +584,10 @@ class QuadrotorEnv(gym.Env):
             self._log_file.close()
             self._log_file = None
             self._log_writer = None
+        if self._action_log_file is not None:
+            self._action_log_file.close()
+            self._action_log_file = None
+            self._action_log_writer = None
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None
