@@ -8,11 +8,11 @@ from controllers.controllers import *
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    name = "so3-30dr-lazy"
+    name = "px4-30dr-rand-dt"
 
     env = QuadrotorVecEnv(
         num_envs=100, 
-        controller="so3", 
+        controller="px4", 
         device=device)
 
     policy_kwargs = dict(

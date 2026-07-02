@@ -24,9 +24,9 @@ ANGLE     = 45.0
 MAX_T     = 20.0
 TORQUE_C  = 0.012
 
-DT_INT        = 0.01  #0.001   
-DT_RATE       = 0.01  #0.004   
-DT_NOM        = 0.01  #0.015
+# DT_INT        = 0.01  #0.001   
+# DT_RATE       = 0.01  #0.004   
+# DT_NOM        = 0.01  #0.015
 
 DT_INT        = 0.001   
 DT_RATE       = 0.004   
@@ -50,7 +50,7 @@ PPO_LOG_DIR = "/home/adame/AirBender/outputs/ppo_logs"
 # Unused
 Y_WIND_MIN = -1.0
 Y_WIND_MAX =  1.0
-DIST_X_DIR = 15.0 # m/s2
+DIST_X_DIR = 8.0 # m/s2
 
 # ----------------------------------------------------------
 # GPU vectorised environment  (for training)
@@ -189,7 +189,7 @@ class QuadrotorVecEnv(VecEnv):
         n_int_steps  = round(DT_RATE / DT_INT)  # 4 integration steps per inner control step (0.004 / 0.001 ) 
 
         # 2-5 inner control steps per policy command 
-        # n_rate_steps = int(np.random.randint(2, 6)) # policy dt is either 0.008, 0.012, 0.016 or 0.02 
+        n_rate_steps = int(np.random.randint(2, 6)) # policy dt is either 0.008, 0.012, 0.016 or 0.02 
 
         # print("Policy Command")
         for _ in range(n_rate_steps):
@@ -351,8 +351,8 @@ class QuadrotorEnv(gym.Env):
         ], dtype=np.float32)
 
         self.observation_space = spaces.Box(-obs_high, obs_high, dtype=np.float32)
-        self.action_space      = spaces.Box(0.0, 1.0, shape=(4,), dtype=np.float32)
-        # self.action_space      = spaces.Box(0.0, 1.0, shape=(10,), dtype=np.float32)
+        # self.action_space      = spaces.Box(0.0, 1.0, shape=(4,), dtype=np.float32)
+        self.action_space      = spaces.Box(0.0, 1.0, shape=(10,), dtype=np.float32)
 
         if self._log_dir is not None:
             self._log_dir.mkdir(parents=True, exist_ok=True)
@@ -380,7 +380,7 @@ class QuadrotorEnv(gym.Env):
     # ----- Gym interface ---------------------
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.dynamics.set_params(*self.randomizer.sample(1, randomize=False))
+        self.dynamics.set_params(*self.randomizer.sample(1, randomize=True))
         # self.dynamics.print_params()
         self._episode_id += 1
         self._step_index = 0
@@ -472,13 +472,14 @@ class QuadrotorEnv(gym.Env):
             thrust_cmd = self.controller.map(state_t, action_t, dt=DT_RATE)
             for _ in range(n_int_steps):
                 state_t = self.dynamics.propagate(state_t, thrust_cmd)
+                # in_zone = (state_t[0, 1] >= Y_WIND_MIN) & (state_t[0, 1] <= Y_WIND_MAX)
+                # state_t[in_zone, 0, 3] -= DIST_X_DIR * DT_INT 
         self._state = state_t[0].numpy()
 
         self._elapsed_time += n_rate_steps * n_int_steps * DT_INT
 
         # # Simulating wind disturbance
-        # in_zone = (self._state[1] >= Y_WIND_MIN) & (self._state[1] <= Y_WIND_MAX)
-        # self._state[in_zone, 3] -= DIST_X_DIR * DT 
+
 
         # self._step_count += 1
         p = self._state[0:3]
