@@ -16,33 +16,26 @@ from utils.randomizer import QuadrotorRandomizer
 from utils.math import rpy_to_rotmat, rpy_to_rotmat_np
 from misc.loader import load_gates_from_yaml
 
-GRAVITY   = 9.81
-MASS      = 1.21
-INERTIA   = (0.007, 0.007, 0.013)
-LENGTH    = 0.15
-ANGLE     = 45.0
-MAX_T     = 20.0
-TORQUE_C  = 0.012
-
-# DT_INT        = 0.01  #0.001   
-# DT_RATE       = 0.01  #0.004   
-# DT_NOM        = 0.01  #0.015
+GRAVITY       = 9.81
+MASS          = 1.21
+INERTIA       = (0.007, 0.007, 0.013)
+LENGTH        = 0.15
+ANGLE         = 45.0
+MAX_T         = 20.0
+TORQUE_C      = 0.012
 
 DT_INT        = 0.001   
 DT_RATE       = 0.004   
 DT_NOM        = 0.012
 
-# DT_POLICY_MIN = 0.008  
-# DT_POLICY_MAX = 0.02 
+MAX_TIME      = 12.0  
 
-MAX_TIME      = 12.0  # [s]
+X_THRESH      = 5.0
+Y_THRESH      = 8.0
+Z_THRESH      = 6.0
 
-X_THRESH        = 5.0
-Y_THRESH        = 8.0
-Z_THRESH        = 6.0
-
-GATE_HALF_W     = 0.6
-GATE_HALF_H     = 0.6
+GATE_HALF_W   = 0.6
+GATE_HALF_H   = 0.6
 
 TRACK_PATH = "misc/racing_tracks/fig8.yaml"
 PPO_LOG_DIR = "/home/adame/AirBender/outputs/ppo_logs"
@@ -116,14 +109,23 @@ class QuadrotorVecEnv(VecEnv):
         self.prev_pos     = torch.zeros(N, 3,  dtype=torch.float32, device=self.device)
         self.step_count   = torch.zeros(N, dtype=torch.long,        device=self.device)
         self.elapsed_time = torch.zeros(N, dtype=torch.float32, device=self.device)
-        # self.control_dt = torch.full((N,), DT_NOM, dtype=torch.float32, device=self.device)
-
+  
         self._pending_actions: Optional[torch.Tensor] = None
 
         self._reset_envs(torch.ones(N, dtype=torch.bool, device=self.device))
 
         self.episode_returns = torch.zeros(N, device=self.device)
         self.episode_lengths = torch.zeros(N, device=self.device, dtype=torch.int64)
+
+        # Testing wether compiling makes training faster
+        def _propagate_n(dynamics, n):
+            def fn(state, cmd):
+                for _ in range(n):
+                    state = dynamics.propagate(state, cmd)
+                return state
+            return torch.compile(fn)
+
+        self._compiled_propagate = _propagate_n(self.dynamics, round(DT_RATE/DT_INT))
 
 
     def _reset_envs(self, mask: torch.Tensor) -> None:
@@ -149,7 +151,6 @@ class QuadrotorVecEnv(VecEnv):
         self.prev_pos[idx]     = 0.0
         self.step_count[idx]   = 0
         self.elapsed_time[idx] = 0.0
-        # self.control_dt[idx]   = DT_NOM
 
         self.dynamics.set_params(*self.randomizer.sample(n), idx=idx)
         self.controller.reset(mask) 
@@ -167,8 +168,6 @@ class QuadrotorVecEnv(VecEnv):
         rel_vel    = (RT @ v.unsqueeze(-1)).squeeze(-1)               
         gate_norm  = self.gates_normal[self.gate_idx]                  
         gate_idx_f = self.gate_idx.float().unsqueeze(-1)      
-
-        # dt_ctrl      = ((self.control_dt - DT_NOM) / (DT_POLICY_MAX - DT_POLICY_MIN)).unsqueeze(-1)
 
         obs = torch.cat([rel_pos, rel_vel, q, w, gate_pos, gate_norm, gate_idx_f], dim=-1)
         return obs.cpu().numpy().astype(np.float32)
@@ -199,9 +198,12 @@ class QuadrotorVecEnv(VecEnv):
                 self.states = self.dynamics.propagate(self.states, thrust_commands)
                 # print("Integration Step")
 
+        # for _ in range(n_rate_steps):
+        #     thrust_commands = self.controller.map(self.states, self._pending_actions, dt=DT_RATE)
+        #     self.states = self._compiled_propagate(self.states, thrust_commands)
+
         self.elapsed_time += n_rate_steps * n_int_steps * DT_INT    # true integrated time
         self.step_count += 1
-        # self.control_dt.fill_(control_dt)
 
         p = self.states[:, 0:3]
         w = self.states[:, 10:13]

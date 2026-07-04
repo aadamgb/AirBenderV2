@@ -46,6 +46,10 @@ class px4CTBR(BaseController):
         self.roll_scale   = torch.sign(mixer[1])
         self.pitch_scale  = torch.sign(mixer[2])
         self.yaw_scale    = torch.sign(mixer[3])
+        print("thrust_scale:", self.thrust_scale)
+        print("roll_scale:", self.roll_scale)
+        print("pitch_scale:", self.pitch_scale)
+        print("yaw_scale:", self.yaw_scale)
 
         self.rate_int   = None
         self._prev_rate = None
@@ -99,7 +103,6 @@ class px4CTBR(BaseController):
         rate_i = rate_i.clamp(-self.lim_int, self.lim_int)
         self.rate_int = torch.where(torch.isfinite(rate_i), rate_i, self.rate_int)
 
-    # PX4 Airmode 1 ?
     def _compute_desat_gain(self, outputs, desat, min_o, max_o, eps=1e-6):
         valid     = desat.abs() >= eps                       
         desat_sfe = torch.where(valid, desat, torch.ones_like(desat))
@@ -140,14 +143,15 @@ class px4CTBR(BaseController):
         # mix without yaw
         outputs = (roll  * self.roll_scale
                    + pitch * self.pitch_scale
-                   + thr   * self.thrust_scale)             
+                   + thr   * self.thrust_scale)    
 
+
+        # Airmode Disabled
         outputs = self._minimize_saturation(outputs, self.thrust_scale, 0.0, 1.0, reduce_only=True)
         outputs = self._minimize_saturation(outputs, self.roll_scale,   0.0, 1.0, reduce_only=False)
         outputs = self._minimize_saturation(outputs, self.pitch_scale,  0.0, 1.0, reduce_only=False)
         outputs = self._mix_yaw(outputs, yaw)
 
-        # the 2x-1 / 0.5x+0.5 round-trip collapses to a clamp
         return outputs.clamp(0.0, 1.0)
 
 class so3LVHR_CTBR(BaseController):

@@ -34,7 +34,7 @@ class QuadrotorDynamics:
     Action : (N,  4)  per-motor thrust fraction ∈ [0, 1]
     """
 
-    def __init__(self, mass, inertia, length, angle, torque_const, tau_m, eta, Cd, rho, gravity, dt, device='cuda'):
+    def __init__(self, mass, inertia, length, angle, torque_const, tau_m, eta, Cd, rho, gravity=9.81, dt=0.01, device='cuda'):
         self.device = torch.device(device if torch.cuda.is_available() or device == 'cpu' else 'cpu')
         self.G = torch.tensor([0., 0., -gravity], dtype=torch.float32, device=self.device)
         self.dt = dt
