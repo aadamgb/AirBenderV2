@@ -1,0 +1,18 @@
+defaults:
+  - env: tt        # Task
+  - dynamics: a300    # Quadrotor Model
+  - _self_
+
+
+# Control Mode
+cm: ctbr              
+
+device: "cuda"
+dt: 0.01
+
+num_envs: 1024
+episodes: 15
+steps: 800
+
+truncation: 50
+

@@ -3,9 +3,10 @@ from stable_baselines3 import PPO
 from env.quadrotor_env import QuadrotorEnv
 
 
-model = PPO.load("outputs/so3+g-30dr-rand-dt_74M")
+# model = PPO.load("outputs/so3+g-30dr-rand-dt_74M")
+model = PPO.load("outputs/px4/px4-30dr-rand-dt_39M")
 
-env = QuadrotorEnv(render_mode="human", controller="so3+g")
+env = QuadrotorEnv(render_mode="human", controller="px4")
 
 obs, _ = env.reset()
 

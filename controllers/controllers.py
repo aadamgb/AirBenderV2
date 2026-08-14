@@ -8,6 +8,9 @@ class BaseController:
     def reset(self, env_mask: torch.Tensor | None = None) -> None:
         pass
 
+    def detach_state(self) -> None:
+        pass
+
 class SRT(BaseController):
     def __init__(self, max_thrust, **kwargs): 
         self.max_thrust = max_thrust
@@ -46,10 +49,6 @@ class px4CTBR(BaseController):
         self.roll_scale   = torch.sign(mixer[1])
         self.pitch_scale  = torch.sign(mixer[2])
         self.yaw_scale    = torch.sign(mixer[3])
-        print("thrust_scale:", self.thrust_scale)
-        print("roll_scale:", self.roll_scale)
-        print("pitch_scale:", self.pitch_scale)
-        print("yaw_scale:", self.yaw_scale)
 
         self.rate_int   = None
         self._prev_rate = None
@@ -64,6 +63,12 @@ class px4CTBR(BaseController):
                 self.rate_int[env_mask] = 0.0
             if self._prev_rate is not None:
                 self._prev_rate[env_mask] = 0.0
+
+    def detach_state(self) -> None:
+        if self.rate_int is not None:
+            self.rate_int = self.rate_int.detach()
+        if self._prev_rate is not None:
+            self._prev_rate = self._prev_rate.detach()
 
     def map(self, state, action, angular_accel=None, dt: float = 0.01):
         N = state.shape[0]
@@ -84,17 +89,13 @@ class px4CTBR(BaseController):
         torque = (self.gain_p  * rate_error
                   + self.rate_int
                   - self.gain_d  * angular_accel
-                  + self.gain_ff * rate_sp)            # normalized [-1,1]ish
+                  + self.gain_ff * rate_sp)            
         self._update_integral(rate_error, dt)
 
-        # collective force -> normalized throttle (quadratic model)
-        throttle = torch.sqrt(action[:, 0:1].clamp(min=0.0))   
-
-        # PX4 airmode-disabled mixer, normalized [0,1] per motor
+        throttle = action[:, 0:1].clamp(min=0.0)   
         motor_norm = self._mixer_px4(throttle, torque)         
 
-        # normalized throttle -> physical per-motor force
-        return motor_norm ** 2 * self.max_thrust
+        return motor_norm * self.max_thrust
 
     def _update_integral(self, rate_error, dt):
         i_factor = rate_error / self.i_factor_norm
@@ -145,7 +146,6 @@ class px4CTBR(BaseController):
                    + pitch * self.pitch_scale
                    + thr   * self.thrust_scale)    
 
-
         # Airmode Disabled
         outputs = self._minimize_saturation(outputs, self.thrust_scale, 0.0, 1.0, reduce_only=True)
         outputs = self._minimize_saturation(outputs, self.roll_scale,   0.0, 1.0, reduce_only=False)
@@ -155,10 +155,6 @@ class px4CTBR(BaseController):
         return outputs.clamp(0.0, 1.0)
 
 class so3LVHR_CTBR(BaseController):
-    """
-    Outer geometric loop: policy outputs (velocity_cmd[3], heading_rate[1]) in [0,1].
-    Produces a CTBR action and delegates to the inner rate controller (px4CTBR)
-    """
     def __init__(self,
                  mixer,
                  max_thrust,
@@ -185,7 +181,10 @@ class so3LVHR_CTBR(BaseController):
                           px4CTBR(mixer, max_thrust, max_rates=max_rates, device=device)
 
     def reset(self, env_mask=None):
-        self.inner.reset(env_mask)   
+        self.inner.reset(env_mask)
+
+    def detach_state(self) -> None:
+        self.inner.detach_state()
 
     def map(self, state, action, dt: float = 0.01):
         N = state.shape[0]
@@ -218,7 +217,6 @@ class so3LVHR_CTBR(BaseController):
 
         omega_cmd = -self.k_R * e_R + w_ff  
 
-        # --- encode as CTBR action for the inner rate loop ---
         a0      = (f_coll / (4.0 * self.max_thrust)).clamp(0.0, 1.0)
         a_rates = ((omega_cmd / self.max_rates + 1.0) * 0.5).clamp(0.0, 1.0)
         ctbr_action = torch.cat([a0, a_rates], dim=-1)                
@@ -255,17 +253,14 @@ class so3LVHRg_CTBR(so3LVHR_CTBR):
         v = state[:, 3:6]
         R = quat_to_rotmat(state[:, 6:10])
 
-        # decode setpoints ([0,1] -> physical)
         v_cmd    = (2.0 * action[:, 0:3] - 1.0) * self.v_max
         yaw_rate = (2.0 * action[:, 3:4] - 1.0) * self.yawrate_max
 
-        # decode per-axis gains ([0,1] -> [min, max]), shape (N,3)
         k_v = self.k_v_min + action[:, 4:7]  * (self.k_v_max - self.k_v_min)
         k_R = self.k_R_min + action[:, 7:10] * (self.k_R_max - self.k_R_min)
 
         e3 = torch.zeros(N, 3, device=self.device); e3[:, 2] = 1.0
 
-        # --- translational: velocity error -> desired specific thrust (world) ---
         e_v     = v_cmd - v
         acc_des = k_v * e_v + self.g * e3
 
@@ -273,7 +268,6 @@ class so3LVHRg_CTBR(so3LVHR_CTBR):
         b3     = R[:, :, 2]
         f_coll = (self.mass * (acc_des * b3).sum(-1, keepdim=True)).clamp_min(0.0)
 
-        # --- desired attitude: b1 from current heading (decoupled yaw) ---
         yaw  = torch.atan2(R[:, 1, 0], R[:, 0, 0])
         b1_c = torch.stack([torch.cos(yaw), torch.sin(yaw), torch.zeros_like(yaw)], dim=-1)
         b2_des = torch.cross(b3_des, b1_c, dim=-1)
@@ -281,7 +275,6 @@ class so3LVHRg_CTBR(so3LVHR_CTBR):
         b1_des = torch.cross(b2_des, b3_des, dim=-1)
         R_des  = torch.stack([b1_des, b2_des, b3_des], dim=-1)
 
-        # --- SO(3) attitude error -> body-rate command ---
         e_R = vee(0.5 * (R_des.transpose(1, 2) @ R - R.transpose(1, 2) @ R_des))
 
         w_des_world = torch.cat([torch.zeros(N, 2, device=self.device), yaw_rate], dim=-1)
@@ -289,7 +282,6 @@ class so3LVHRg_CTBR(so3LVHR_CTBR):
 
         omega_cmd = -k_R * e_R + w_ff
 
-        # --- encode as CTBR action for the inner rate loop ---
         a0      = (f_coll / (4.0 * self.max_thrust)).clamp(0.0, 1.0)
         a_rates = ((omega_cmd / self.max_rates + 1.0) * 0.5).clamp(0.0, 1.0)
         ctbr_action = torch.cat([a0, a_rates], dim=-1)

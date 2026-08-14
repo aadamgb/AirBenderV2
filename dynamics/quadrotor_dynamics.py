@@ -73,7 +73,7 @@ class QuadrotorDynamics:
     def _compute_drag(self, v, q):
         R = quat_to_rotmat(q)
         v_body = (R.transpose(-1, -2) @ v.unsqueeze(-1)).squeeze(-1)
-        f_drag = - 0.5 * self.rho * v_body.abs() * v_body * self.Cd # NOTE: I think Cd is already Cd*area but check with Rob
+        f_drag = - 0.5 * self.rho * v_body.abs() * v_body * self.Cd # TODO: I think Cd is already Cd*area but check 
         return f_drag
     
     def _motor_dynamics(self, Omega, thrust_cmd):
@@ -122,16 +122,16 @@ class QuadrotorDynamics:
             self.rho               = rho
             self.mixer             = mixer
         else:
-            self.mass[idx]         = mass
-            self.J[idx]            = inertia
-            self.length[idx]       = length
-            self.angle[idx]        = angle
-            self.torque_const[idx] = torque_const
-            self.tau_m[idx]        = tau_m
-            self.eta[idx]          = eta
-            self.Cd[idx]           = Cd
-            self.rho[idx]           = rho
-            self.mixer[idx]         = mixer
+            self.mass         = self.mass.clone();         self.mass[idx]         = mass
+            self.J             = self.J.clone();            self.J[idx]            = inertia
+            self.length       = self.length.clone();       self.length[idx]       = length
+            self.angle        = self.angle.clone();        self.angle[idx]        = angle
+            self.torque_const = self.torque_const.clone(); self.torque_const[idx] = torque_const
+            self.tau_m        = self.tau_m.clone();        self.tau_m[idx]        = tau_m
+            self.eta          = self.eta.clone();          self.eta[idx]          = eta
+            self.Cd           = self.Cd.clone();           self.Cd[idx]           = Cd
+            self.rho          = self.rho.clone();          self.rho[idx]          = rho
+            self.mixer        = self.mixer.clone();        self.mixer[idx]        = mixer
 
     def print_params(self) -> None:
         def to_cpu(x):

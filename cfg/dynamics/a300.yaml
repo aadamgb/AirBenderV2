@@ -1,0 +1,80 @@
+name: quadrotor
+
+# === Domain Randomization ===
+# dr : False
+# ============================
+
+# Scale factor — drives correlated parameter sampling across envs
+sf:
+  nominal: 0.5
+  min: 0.45
+  max: 0.55
+  # min: 0.5
+  # max: 0.5
+
+# Noise factor applied on top of correlated scaling
+nf: 0.05 #0.1
+
+# -----------------------------
+# Structural Params
+# -----------------------------
+# Arm length [m] — primary geometric parameter, correlates mass/inertia
+arm_length:
+  nominal: 0.15
+  min: 0.1
+  max: 0.2
+
+# Arm angle [deg] (X-config)
+arm_angle: 
+  nominal: 45.0 
+  # no scale, only add noise
+
+# Mass [kg]
+mass:
+  nominal: 1.21
+  min: 0.8
+  max: 1.8
+
+# Inertia [kg·m^2] — diagonal elements [Ixx, Iyy, Izz]
+inertia:
+  xx:
+    nominal: 0.007
+    min: 0.0009
+    max: 0.014
+  yy:
+    nominal: 0.007
+    min: 0.0009
+    max: 0.014
+  zz:
+    nominal: 0.013
+    min: 0.009
+    max: 0.017
+
+
+# -----------------------------
+# Motor Params
+# -----------------------------
+# Drag-torque coefficient: tau = km * Fz = km * kf * Omega^2   [Nm]
+km:
+  nominal: 0.012
+  min: 0.008
+  max: 0.02
+
+# T [N] = a0 * rpm^2
+a0:
+  nominal: 0.000000045
+  min: 0.000000044
+  max: 0.000000046
+
+motor_tau:
+  nominal: 0.05
+  min: 0.045
+  max: 0.055
+
+# max_rotor_thrust: 20.5    # [N]
+# min_rotor_thrust: 0.5     # [N]
+
+
+# This is taken into account only for the SRT and CTBR controllers
+max_TWR: 6.9              # (4 * max_rotor_thrust) / (9.81 * m)
+
