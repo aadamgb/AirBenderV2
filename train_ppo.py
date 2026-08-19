@@ -2,7 +2,7 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 
-from env.quadrotor_env import QuadrotorVecEnv
+from env.quadrotor_env_ppo import QuadrotorVecEnv
 from controllers.controllers import *
 
 if __name__ == "__main__":
